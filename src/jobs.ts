@@ -25,7 +25,6 @@ export interface Job {
   reasoningEffort: ReasoningEffort;
   sandbox: SandboxMode;
   parentSessionId?: string;
-  oneShot?: boolean;
   cwd: string;
   createdAt: string;
   startedAt?: string;
@@ -190,12 +189,6 @@ export function deleteJob(jobId: string): boolean {
     } catch {
       // Prompt file may not exist
     }
-    // Clean up one-shot result file if exists
-    try {
-      unlinkSync(join(config.jobsDir, `${jobId}.result`));
-    } catch {
-      // Result file may not exist
-    }
     return true;
   } catch {
     return false;
@@ -208,7 +201,6 @@ export interface StartJobOptions {
   reasoningEffort?: ReasoningEffort;
   sandbox?: SandboxMode;
   parentSessionId?: string;
-  oneShot?: boolean;
   cwd?: string;
 }
 
@@ -226,7 +218,6 @@ export function startJob(options: StartJobOptions): Job {
     reasoningEffort: options.reasoningEffort || config.defaultReasoningEffort,
     sandbox: options.sandbox || config.defaultSandbox,
     parentSessionId: options.parentSessionId,
-    oneShot: options.oneShot ?? false,
     cwd,
     createdAt: new Date().toISOString(),
   };
@@ -240,7 +231,6 @@ export function startJob(options: StartJobOptions): Job {
     model: job.model,
     reasoningEffort: job.reasoningEffort,
     sandbox: job.sandbox,
-    oneShot: job.oneShot ?? false,
     cwd,
   });
 
@@ -276,7 +266,7 @@ export function killJob(jobId: string): boolean {
 
 export function sendToJob(jobId: string, message: string): boolean {
   const job = loadJob(jobId);
-  if (!job || !job.tmuxSession || job.oneShot) return false;
+  if (!job || !job.tmuxSession) return false;
 
   return sendMessage(job.tmuxSession, message);
 }
@@ -296,20 +286,6 @@ export function getJobOutput(jobId: string, lines?: number): string | null {
   if (job.tmuxSession && sessionExists(job.tmuxSession)) {
     const output = capturePane(job.tmuxSession, { lines });
     if (output) return output;
-  }
-
-  if (job.oneShot) {
-    const resultFile = join(config.jobsDir, `${jobId}.result`);
-    try {
-      const result = readFileSync(resultFile, "utf-8");
-      if (lines) {
-        const allLines = result.split("\n");
-        return allLines.slice(-lines).join("\n");
-      }
-      return result;
-    } catch {
-      // Result file may not exist yet
-    }
   }
 
   // Fall back to log file
@@ -334,16 +310,6 @@ export function getJobFullOutput(jobId: string): string | null {
   if (job.tmuxSession && sessionExists(job.tmuxSession)) {
     const output = captureFullHistory(job.tmuxSession);
     if (output) return output;
-  }
-
-  if (job.oneShot) {
-    const resultFile = join(config.jobsDir, `${jobId}.result`);
-    try {
-      const result = readFileSync(resultFile, "utf-8");
-      return result;
-    } catch {
-      // Result file may not exist yet
-    }
   }
 
   // Fall back to log file
@@ -387,24 +353,11 @@ export function refreshJobStatus(jobId: string): Job | null {
       // Session ended completely
       job.status = "completed";
       job.completedAt = new Date().toISOString();
-      const resultFile = join(config.jobsDir, `${jobId}.result`);
       const logFile = join(config.jobsDir, `${jobId}.log`);
-      if (job.oneShot) {
-        try {
-          job.result = readFileSync(resultFile, "utf-8");
-        } catch {
-          try {
-            job.result = readFileSync(logFile, "utf-8");
-          } catch {
-            // No result or log file
-          }
-        }
-      } else {
-        try {
-          job.result = readFileSync(logFile, "utf-8");
-        } catch {
-          // No log file
-        }
+      try {
+        job.result = readFileSync(logFile, "utf-8");
+      } catch {
+        // No log file
       }
       saveJob(job);
     } else {

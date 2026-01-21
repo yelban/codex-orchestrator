@@ -48,7 +48,6 @@ Options:
   -d, --dir <path>           Working directory (default: cwd)
   --parent-session <id>      Parent session ID for linkage
   --map                      Include codebase map if available
-  --one-shot                 Run in non-interactive exec mode
   --dry-run                  Show prompt without executing
   --strip-ansi               Remove ANSI escape codes from output (for capture/output)
   --json                     Output JSON (jobs command only)
@@ -85,7 +84,6 @@ interface Options {
   dir: string;
   includeMap: boolean;
   parentSessionId: string | null;
-  oneShot: boolean;
   dryRun: boolean;
   stripAnsi: boolean;
   json: boolean;
@@ -116,7 +114,6 @@ function parseArgs(args: string[]): {
     dir: process.cwd(),
     includeMap: false,
     parentSessionId: null,
-    oneShot: false,
     dryRun: false,
     stripAnsi: false,
     json: false,
@@ -159,8 +156,6 @@ function parseArgs(args: string[]): {
       options.parentSessionId = args[++i] ?? null;
     } else if (arg === "--map") {
       options.includeMap = true;
-    } else if (arg === "--one-shot") {
-      options.oneShot = true;
     } else if (arg === "--dry-run") {
       options.dryRun = true;
     } else if (arg === "--strip-ansi") {
@@ -296,7 +291,6 @@ async function main() {
           reasoningEffort: options.reasoning,
           sandbox: options.sandbox,
           parentSessionId: options.parentSessionId ?? undefined,
-          oneShot: options.oneShot,
           cwd: options.dir,
         });
 
@@ -307,10 +301,8 @@ async function main() {
         console.log("");
         console.log("Commands:");
         console.log(`  Capture output:  codex-agent capture ${job.id}`);
-        if (!job.oneShot) {
-          console.log(`  Send message:    codex-agent send ${job.id} "message"`);
-          console.log(`  Attach session:  tmux attach -t ${job.tmuxSession}`);
-        }
+        console.log(`  Send message:    codex-agent send ${job.id} "message"`);
+        console.log(`  Attach session:  tmux attach -t ${job.tmuxSession}`);
         break;
       }
 
@@ -573,15 +565,12 @@ async function main() {
             reasoningEffort: options.reasoning,
             sandbox: options.sandbox,
             parentSessionId: options.parentSessionId ?? undefined,
-            oneShot: options.oneShot,
             cwd: options.dir,
           });
 
           console.log(`Job started: ${job.id}`);
           console.log(`tmux session: ${job.tmuxSession}`);
-          if (!job.oneShot) {
-            console.log(`Attach: tmux attach -t ${job.tmuxSession}`);
-          }
+          console.log(`Attach: tmux attach -t ${job.tmuxSession}`);
         } else {
           console.log(HELP);
         }

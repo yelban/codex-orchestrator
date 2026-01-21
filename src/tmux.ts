@@ -42,7 +42,7 @@ export function sessionExists(sessionName: string): boolean {
 }
 
 /**
- * Create a new tmux session running codex (interactive or one-shot)
+ * Create a new tmux session running codex (interactive mode)
  */
 export function createSession(options: {
   jobId: string;
@@ -50,7 +50,6 @@ export function createSession(options: {
   model: string;
   reasoningEffort: string;
   sandbox: string;
-  oneShot: boolean;
   cwd: string;
 }): { sessionName: string; success: boolean; error?: string } {
   const sessionName = getSessionName(options.jobId);
@@ -58,34 +57,11 @@ export function createSession(options: {
 
   // Create prompt file to avoid shell escaping issues
   const promptFile = `${config.jobsDir}/${options.jobId}.prompt`;
-  const resultFile = `${config.jobsDir}/${options.jobId}.result`;
   const fs = require("fs");
   fs.writeFileSync(promptFile, options.prompt);
 
   try {
-    if (options.oneShot) {
-      // codex exec doesn't support -a (approval) flag - it's non-interactive
-      const execArgs = [
-        `-m`, options.model,
-        `-c`, `model_reasoning_effort="${options.reasoningEffort}"`,
-        `-c`, `check_for_update_on_startup=false`,
-        `-s`, options.sandbox,
-        `--output-last-message`, `"${resultFile}"`,
-      ].join(" ");
-
-      // Use bash -c with proper redirection
-      // script -q logs terminal output, prompt passed via file
-      const shellCmd = `script -q "${logFile}" bash -c 'codex exec ${execArgs} - < "${promptFile}"'`;
-
-      execSync(
-        `tmux new-session -d -s "${sessionName}" -c "${options.cwd}" "${shellCmd}"`,
-        { stdio: "pipe", cwd: options.cwd }
-      );
-
-      return { sessionName, success: true };
-    }
-
-    // Build the codex command (interactive mode, not exec)
+    // Build the codex command (interactive mode)
     // We use the interactive TUI so we can send messages later
     const codexArgs = [
       `-c`, `model="${options.model}"`,
