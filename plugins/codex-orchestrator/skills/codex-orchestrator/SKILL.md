@@ -108,36 +108,24 @@ codex-agent health    # checks tmux + codex are available
 
 ### If Not Installed
 
-If the user says "init", "setup", or codex-agent is not found, guide them through installation:
+If the user says "init", "setup", or codex-agent is not found, **run the install script**:
 
 ```bash
-# Automated setup (checks and installs all dependencies)
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/install.sh"
 ```
 
-Or manual step-by-step:
+**Always use the install script.** Do NOT manually check dependencies or try to install things yourself step-by-step. The script handles everything: detects the platform, checks each dependency, installs what's missing via official package managers, clones the repo, and adds `codex-agent` to PATH. No sudo required.
+
+If `${CLAUDE_PLUGIN_ROOT}` is not available (manual skill install), the user can run:
 
 ```bash
-# 1. tmux
-brew install tmux                  # macOS
-# sudo apt-get install -y tmux    # Ubuntu/Debian
-# sudo pacman -S tmux             # Arch
+bash ~/.codex-orchestrator/plugins/codex-orchestrator/scripts/install.sh
+```
 
-# 2. Bun
-curl -fsSL https://bun.sh/install | bash
+After installation, the user must authenticate with OpenAI if they haven't already:
 
-# 3. OpenAI Codex CLI
-npm install -g @openai/codex
-
-# 4. Authenticate with OpenAI (required)
+```bash
 codex --login
-
-# 5. codex-orchestrator
-git clone https://github.com/kingbootoshi/codex-orchestrator.git ~/.codex-orchestrator
-cd ~/.codex-orchestrator && bun install
-
-# 6. Add to PATH (add this line to ~/.bashrc or ~/.zshrc)
-export PATH="$HOME/.codex-orchestrator/bin:$PATH"
 ```
 
 **All dependencies use official sources only.** tmux from system package managers, Bun from bun.sh, Codex CLI from npm. No third-party scripts or unknown URLs.
