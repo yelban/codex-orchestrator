@@ -41,8 +41,8 @@ Usage:
   codex-agent health                     Check tmux and codex availability
 
 Options:
-  -r, --reasoning <level>    Reasoning effort: low, medium, high, xhigh (default: medium)
-  -m, --model <model>        Model name (default: gpt-5.2-codex)
+  -r, --reasoning <level>    Reasoning effort: low, medium, high, xhigh (default: xhigh)
+  -m, --model <model>        Model name (default: gpt-5.3-codex)
   -s, --sandbox <mode>       Sandbox: read-only, workspace-write, danger-full-access
   -f, --file <glob>          Include files matching glob (can repeat)
   -d, --dir <path>           Working directory (default: cwd)
