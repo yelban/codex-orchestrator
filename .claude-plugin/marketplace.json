@@ -1,8 +1,8 @@
 {
   "name": "codex-orchestrator-marketplace",
   "owner": {
-    "name": "Bootoshi",
-    "url": "https://github.com/kingbootoshi"
+    "name": "yelban",
+    "url": "https://github.com/yelban"
   },
   "metadata": {
     "description": "Delegate tasks to OpenAI Codex agents via tmux sessions. Designed for Claude Code orchestration.",

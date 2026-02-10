@@ -29,7 +29,7 @@ Codex Agent - Delegate tasks to GPT Codex agents (tmux-based)
 Usage:
   codex-agent start "prompt" [options]   Start agent in tmux session
   codex-agent status <jobId>             Check job status
-  codex-agent send <jobId> "message"     Send message to running agent
+  codex-agent send <jobId> "message"     Send message to running agent (interactive only)
   codex-agent capture <jobId> [lines]    Capture recent output (default: 50 lines)
   codex-agent output <jobId>             Get full session output
   codex-agent attach <jobId>             Get tmux attach command
@@ -46,6 +46,7 @@ Options:
   -s, --sandbox <mode>       Sandbox: read-only, workspace-write, danger-full-access
   -f, --file <glob>          Include files matching glob (can repeat)
   -d, --dir <path>           Working directory (default: cwd)
+  --interactive              Use interactive TUI mode (supports send, idle detection)
   --parent-session <id>      Parent session ID for linkage
   --map                      Include codebase map if available
   --dry-run                  Show prompt without executing
@@ -55,14 +56,21 @@ Options:
   --all                      Show all jobs (jobs command only)
   -h, --help                 Show this help
 
+Modes:
+  Default (exec):     codex exec — auto-completes, no send support
+  Interactive (TUI):  --interactive — supports send, idle detection auto-exit
+
 Examples:
-  # Start an agent
+  # Start an agent (exec mode, auto-completes)
   codex-agent start "Review this code for security issues" -f "src/**/*.ts"
+
+  # Start in interactive mode (supports send)
+  codex-agent start "Analyze code" --interactive
 
   # Check on it
   codex-agent capture abc123
 
-  # Send additional context
+  # Send additional context (interactive only)
   codex-agent send abc123 "Also check the auth module"
 
   # Attach to watch interactively
@@ -70,12 +78,6 @@ Examples:
 
   # Or use the attach command
   codex-agent attach abc123
-
-Bidirectional Communication:
-  - Use 'send' to give agents additional instructions mid-task
-  - Use 'capture' to see recent output programmatically
-  - Use 'attach' to interact directly in tmux
-  - Press Ctrl+C in tmux to interrupt, type to continue conversation
 `;
 
 interface Options {
@@ -84,6 +86,7 @@ interface Options {
   sandbox: SandboxMode;
   files: string[];
   dir: string;
+  interactive: boolean;
   includeMap: boolean;
   parentSessionId: string | null;
   dryRun: boolean;
@@ -116,6 +119,7 @@ function parseArgs(args: string[]): {
     sandbox: config.defaultSandbox,
     files: [],
     dir: process.cwd(),
+    interactive: false,
     includeMap: false,
     parentSessionId: null,
     dryRun: false,
@@ -158,6 +162,8 @@ function parseArgs(args: string[]): {
       options.files.push(args[++i]);
     } else if (arg === "-d" || arg === "--dir") {
       options.dir = args[++i];
+    } else if (arg === "--interactive") {
+      options.interactive = true;
     } else if (arg === "--parent-session") {
       options.parentSessionId = args[++i] ?? null;
     } else if (arg === "--map") {
@@ -336,16 +342,20 @@ async function main() {
           sandbox: options.sandbox,
           parentSessionId: options.parentSessionId ?? undefined,
           cwd: options.dir,
+          interactive: options.interactive,
         });
 
-        console.log(`Job started: ${job.id}`);
+        const mode = job.interactive ? "interactive" : "exec";
+        console.log(`Job started: ${job.id} (${mode} mode)`);
         console.log(`Model: ${job.model} (${job.reasoningEffort})`);
         console.log(`Working dir: ${job.cwd}`);
         console.log(`tmux session: ${job.tmuxSession}`);
         console.log("");
         console.log("Commands:");
         console.log(`  Capture output:  codex-agent capture ${job.id}`);
-        console.log(`  Send message:    codex-agent send ${job.id} "message"`);
+        if (job.interactive) {
+          console.log(`  Send message:    codex-agent send ${job.id} "message"`);
+        }
         console.log(`  Attach session:  tmux attach -t ${job.tmuxSession}`);
         break;
       }
@@ -391,11 +401,14 @@ async function main() {
         const jobId = positional[0];
         const message = positional.slice(1).join(" ");
 
-        if (sendToJob(jobId, message)) {
+        const sendResult = sendToJob(jobId, message);
+        if (sendResult.sent) {
           console.log(`Sent to ${jobId}: ${message}`);
         } else {
           console.error(`Could not send to job ${jobId}`);
-          console.error("Job may not be running or tmux session not found");
+          if (sendResult.error) {
+            console.error(sendResult.error);
+          }
           process.exit(1);
         }
         break;
@@ -621,9 +634,11 @@ async function main() {
             sandbox: options.sandbox,
             parentSessionId: options.parentSessionId ?? undefined,
             cwd: options.dir,
+            interactive: options.interactive,
           });
 
-          console.log(`Job started: ${job.id}`);
+          const mode = job.interactive ? "interactive" : "exec";
+          console.log(`Job started: ${job.id} (${mode} mode)`);
           console.log(`tmux session: ${job.tmuxSession}`);
           console.log(`Attach: tmux attach -t ${job.tmuxSession}`);
         } else {

@@ -23,6 +23,10 @@ export const config = {
 
   // tmux session prefix
   tmuxPrefix: "codex-agent",
+
+  // Idle detection for interactive mode
+  idleDetectionEnabled: true,
+  idleGracePeriodSeconds: 30,
 };
 
 export type ReasoningEffort = typeof config.reasoningEfforts[number];

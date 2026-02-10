@@ -277,7 +277,12 @@ codex-agent watch <jobId>
 
 ### Communicating with Agents
 
+The `send` command only works with interactive mode jobs (`--interactive`). Default exec mode jobs auto-complete and don't accept messages.
+
 ```bash
+# Start an interactive agent (supports send)
+codex-agent start "Analyze the auth module" --map --interactive
+
 # Send follow-up message
 codex-agent send <jobId> "Focus on the database layer"
 codex-agent send <jobId> "The dependency is installed. Run bun run typecheck"
@@ -305,6 +310,7 @@ codex-agent health                 # verify codex + tmux available
 | `--sandbox` | `-s` | read-only, workspace-write, danger-full-access | File access level |
 | `--file` | `-f` | glob | Include files (repeatable) |
 | `--map` | | flag | Include docs/CODEBASE_MAP.md |
+| `--interactive` | | flag | Use TUI mode (supports send, idle detection) |
 | `--dir` | `-d` | path | Working directory |
 | `--model` | `-m` | string | Model override |
 | `--json` | | flag | JSON output (jobs only) |

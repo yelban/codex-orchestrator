@@ -42,7 +42,24 @@ export function sessionExists(sessionName: string): boolean {
 }
 
 /**
- * Create a new tmux session running codex (interactive mode)
+ * Get the approval flag for codex exec based on sandbox mode
+ */
+function getExecApprovalFlag(sandbox: string): string {
+  switch (sandbox) {
+    case "danger-full-access":
+      return "--dangerously-bypass-approvals-and-sandbox";
+    case "read-only":
+      return "--full-auto";
+    default:
+      // workspace-write and others
+      return "--full-auto";
+  }
+}
+
+/**
+ * Create a new tmux session running codex
+ * - exec mode (default): uses `codex exec` for automatic completion
+ * - interactive mode: uses `codex` TUI with idle detection for send support
  */
 export function createSession(options: {
   jobId: string;
@@ -51,6 +68,7 @@ export function createSession(options: {
   reasoningEffort: string;
   sandbox: string;
   cwd: string;
+  interactive?: boolean;
 }): { sessionName: string; success: boolean; error?: string } {
   const sessionName = getSessionName(options.jobId);
   const logFile = `${config.jobsDir}/${options.jobId}.log`;
@@ -61,62 +79,59 @@ export function createSession(options: {
   fs.writeFileSync(promptFile, options.prompt);
 
   try {
-    // Build the codex command (interactive mode)
-    // We use the interactive TUI so we can send messages later
-    const codexArgs = [
-      `-c`, `model="${options.model}"`,
-      `-c`, `model_reasoning_effort="${options.reasoningEffort}"`,
-      `-c`, `skip_update_check=true`,
-      `-a`, `never`,
-      `-s`, options.sandbox,
-    ].join(" ");
+    let shellCmd: string;
 
-    // Create tmux session with codex running
-    // Use script to capture all output, and keep shell alive after codex exits
-    // This allows us to capture the output even after completion
-    // Create detached session that runs codex and stays open after it exits
-    // Using script to log all terminal output
-    const shellCmd = `script -q "${logFile}" codex ${codexArgs}; echo "\\n\\n[codex-agent: Session complete. Press Enter to close.]"; read`;
+    if (options.interactive) {
+      // Interactive mode: use codex TUI (supports send, needs idle detection)
+      const codexArgs = [
+        `-c`, `model="${options.model}"`,
+        `-c`, `model_reasoning_effort="${options.reasoningEffort}"`,
+        `-c`, `skip_update_check=true`,
+        `-a`, `never`,
+        `-s`, options.sandbox,
+      ].join(" ");
+
+      shellCmd = `script -q "${logFile}" codex ${codexArgs}; echo "\\n\\n[codex-agent: Session complete. Press Enter to close.]"; read`;
+    } else {
+      // Exec mode (default): codex exec auto-completes, pipe through tee for logging
+      const approvalFlag = getExecApprovalFlag(options.sandbox);
+      shellCmd = `cat "${promptFile}" | codex exec -m "${options.model}" -s "${options.sandbox}" ${approvalFlag} --json - 2>&1 | tee "${logFile}"; echo "\\n\\n[codex-agent: Session complete. Press Enter to close.]"; read`;
+    }
 
     execSync(
       `tmux new-session -d -s "${sessionName}" -c "${options.cwd}" '${shellCmd}'`,
       { stdio: "pipe", cwd: options.cwd }
     );
 
-    // Give codex a moment to initialize and show update prompt if any
-    spawnSync("sleep", ["1"]);
+    if (options.interactive) {
+      // Interactive mode: handle update prompt and send the initial prompt
+      spawnSync("sleep", ["1"]);
 
-    // Skip update prompt if it appears by sending "3" (skip until next version)
-    // Then Enter to dismiss any remaining prompts
-    execSync(`tmux send-keys -t "${sessionName}" "3"`, { stdio: "pipe" });
-    spawnSync("sleep", ["0.5"]);
-    execSync(`tmux send-keys -t "${sessionName}" Enter`, { stdio: "pipe" });
-    spawnSync("sleep", ["1"]);
-
-    // Send the prompt (read from file to handle complex prompts)
-    // Using send-keys with the prompt content
-    const promptContent = options.prompt.replace(/'/g, "'\\''"); // Escape single quotes
-
-    // For very long prompts, we'll type it in chunks or use a different approach
-    if (options.prompt.length < 5000) {
-      // Send prompt directly for shorter prompts
-      // Use separate send-keys calls for text and Enter to ensure Enter is processed
-      execSync(
-        `tmux send-keys -t "${sessionName}" '${promptContent}'`,
-        { stdio: "pipe" }
-      );
-      // Small delay to let TUI process the text before Enter
-      spawnSync("sleep", ["0.3"]);
-      execSync(
-        `tmux send-keys -t "${sessionName}" Enter`,
-        { stdio: "pipe" }
-      );
-    } else {
-      // For long prompts, use load-buffer approach
-      execSync(`tmux load-buffer "${promptFile}"`, { stdio: "pipe" });
-      execSync(`tmux paste-buffer -t "${sessionName}"`, { stdio: "pipe" });
-      spawnSync("sleep", ["0.3"]);
+      // Skip update prompt if it appears by sending "3" (skip until next version)
+      execSync(`tmux send-keys -t "${sessionName}" "3"`, { stdio: "pipe" });
+      spawnSync("sleep", ["0.5"]);
       execSync(`tmux send-keys -t "${sessionName}" Enter`, { stdio: "pipe" });
+      spawnSync("sleep", ["1"]);
+
+      // Send the prompt
+      const promptContent = options.prompt.replace(/'/g, "'\\''");
+
+      if (options.prompt.length < 5000) {
+        execSync(
+          `tmux send-keys -t "${sessionName}" '${promptContent}'`,
+          { stdio: "pipe" }
+        );
+        spawnSync("sleep", ["0.3"]);
+        execSync(
+          `tmux send-keys -t "${sessionName}" Enter`,
+          { stdio: "pipe" }
+        );
+      } else {
+        execSync(`tmux load-buffer "${promptFile}"`, { stdio: "pipe" });
+        execSync(`tmux paste-buffer -t "${sessionName}"`, { stdio: "pipe" });
+        spawnSync("sleep", ["0.3"]);
+        execSync(`tmux send-keys -t "${sessionName}" Enter`, { stdio: "pipe" });
+      }
     }
 
     return { sessionName, success: true };
@@ -127,6 +142,17 @@ export function createSession(options: {
       error: (err as Error).message,
     };
   }
+}
+
+/**
+ * Check if a codex interactive session is idle (waiting for input)
+ */
+export function isCodexIdle(sessionName: string): boolean {
+  const output = capturePane(sessionName, { lines: 10 });
+  if (!output) return false;
+  // Strip ANSI codes for reliable pattern matching
+  const clean = output.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
+  return clean.includes('? for shortcuts');
 }
 
 /**

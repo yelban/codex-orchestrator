@@ -15,6 +15,7 @@ import {
   isSessionActive,
   sendMessage,
   sendControl,
+  isCodexIdle,
 } from "./tmux.ts";
 
 export interface Job {
@@ -32,6 +33,9 @@ export interface Job {
   tmuxSession?: string;
   result?: string;
   error?: string;
+  interactive?: boolean;
+  idleDetectedAt?: string;
+  exitSent?: boolean;
 }
 
 function ensureJobsDir(): void {
@@ -231,6 +235,7 @@ export interface StartJobOptions {
   sandbox?: SandboxMode;
   parentSessionId?: string;
   cwd?: string;
+  interactive?: boolean;
 }
 
 export function startJob(options: StartJobOptions): Job {
@@ -249,6 +254,7 @@ export function startJob(options: StartJobOptions): Job {
     parentSessionId: options.parentSessionId,
     cwd,
     createdAt: new Date().toISOString(),
+    interactive: options.interactive || false,
   };
 
   saveJob(job);
@@ -261,6 +267,7 @@ export function startJob(options: StartJobOptions): Job {
     reasoningEffort: job.reasoningEffort,
     sandbox: job.sandbox,
     cwd,
+    interactive: options.interactive,
   });
 
   if (result.success) {
@@ -293,11 +300,23 @@ export function killJob(jobId: string): boolean {
   return true;
 }
 
-export function sendToJob(jobId: string, message: string): boolean {
+export function sendToJob(jobId: string, message: string): { sent: boolean; error?: string } {
   const job = loadJob(jobId);
-  if (!job || !job.tmuxSession) return false;
+  if (!job || !job.tmuxSession) return { sent: false, error: "Job not found or no tmux session" };
 
-  return sendMessage(job.tmuxSession, message);
+  if (!job.interactive) {
+    return { sent: false, error: "Cannot send to non-interactive (exec mode) job. Use --interactive when starting the job." };
+  }
+
+  // Clear idle detection state when sending a new message
+  if (job.idleDetectedAt || job.exitSent) {
+    job.idleDetectedAt = undefined;
+    job.exitSent = undefined;
+    saveJob(job);
+  }
+
+  const ok = sendMessage(job.tmuxSession, message);
+  return ok ? { sent: true } : { sent: false, error: "Failed to send message to tmux session" };
 }
 
 export function sendControlToJob(jobId: string, key: string): boolean {
@@ -402,6 +421,35 @@ export function refreshJobStatus(jobId: string): Job | null {
           job.result = fullOutput;
         }
         saveJob(job);
+      } else if (job.interactive && config.idleDetectionEnabled && !job.exitSent) {
+        // Idle detection for interactive jobs only
+        const idle = isCodexIdle(job.tmuxSession);
+
+        if (idle) {
+          if (!job.idleDetectedAt) {
+            // First detection — record timestamp
+            job.idleDetectedAt = new Date().toISOString();
+            saveJob(job);
+          } else {
+            // Check if grace period has passed AND log mtime is stable
+            const idleSinceMs = Date.now() - Date.parse(job.idleDetectedAt);
+            const logMtime = getLogMtimeMs(job.id);
+            const logStable = logMtime !== null
+              ? (Date.now() - logMtime) > config.idleGracePeriodSeconds * 1000
+              : true;
+
+            if (idleSinceMs >= config.idleGracePeriodSeconds * 1000 && logStable) {
+              // Send /exit to gracefully close codex
+              sendMessage(job.tmuxSession, "/exit");
+              job.exitSent = true;
+              saveJob(job);
+            }
+          }
+        } else if (job.idleDetectedAt) {
+          // False positive recovery — codex resumed work
+          job.idleDetectedAt = undefined;
+          saveJob(job);
+        }
       } else if (isInactiveTimedOut(job)) {
         killSession(job.tmuxSession);
         job.status = "failed";
