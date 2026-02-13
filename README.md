@@ -6,7 +6,7 @@
 
 Delegate tasks to OpenAI Codex agents via tmux sessions. Designed for Claude Code orchestration.
 
-Spawn parallel coding agents, monitor their progress, send follow-up messages mid-task, and capture results - all from Claude Code or the command line.
+Spawn parallel coding agents, monitor their progress, and capture results — all from Claude Code or the command line. Supports two execution modes: **exec** (default, auto-completes) and **interactive** (TUI with send support and idle detection).
 
 ## Installation
 
@@ -104,8 +104,11 @@ This creates `docs/CODEBASE_MAP.md`. After that, every `codex-agent start ... --
 ## Quick Start
 
 ```bash
-# Start an agent
+# Start an agent (exec mode — auto-completes when done)
 codex-agent start "Review this codebase for security vulnerabilities" --map
+
+# Start in interactive mode (supports send for mid-task redirection)
+codex-agent start "Analyze the auth module" --map --interactive
 
 # Check status with structured JSON
 codex-agent jobs --json
@@ -113,7 +116,7 @@ codex-agent jobs --json
 # See what it's doing
 codex-agent capture <jobId>
 
-# Redirect the agent mid-task
+# Redirect the agent mid-task (interactive only)
 codex-agent send <jobId> "Focus on the authentication module instead"
 ```
 
@@ -123,7 +126,7 @@ codex-agent send <jobId> "Focus on the authentication module instead"
 |---------|-------------|
 | `start <prompt>` | Start a new agent with the given prompt |
 | `status <id>` | Check job status and details |
-| `send <id> <msg>` | Send a message to redirect a running agent |
+| `send <id> <msg>` | Send a message to redirect a running agent (interactive only) |
 | `capture <id> [n]` | Get last n lines of output (default: 50) |
 | `output <id>` | Get full session output |
 | `attach <id>` | Print tmux attach command |
@@ -147,6 +150,7 @@ codex-agent send <jobId> "Focus on the authentication module instead"
 | `--map` | Include codebase map (docs/CODEBASE_MAP.md) |
 | `--strip-ansi` | Remove terminal control codes from output |
 | `--json` | Output JSON (jobs command only) |
+| `--interactive` | Use interactive TUI mode (supports send, idle detection) |
 | `--dry-run` | Preview prompt without executing |
 
 ## Jobs JSON Output
@@ -183,9 +187,12 @@ codex-agent start "Check for XSS vulnerabilities in templates" -r high --map -s 
 codex-agent jobs --json
 ```
 
-### Redirecting an Agent
+### Redirecting an Agent (Interactive Mode)
 
 ```bash
+# Start in interactive mode to enable send
+codex-agent start "Investigate auth flow" --map --interactive
+
 # Agent going down wrong path? Redirect it
 codex-agent send abc123 "Stop - focus on the auth module instead"
 
@@ -209,16 +216,27 @@ codex-agent start "Understand the architecture" --map -r high
 
 ## How It Works
 
+### Exec Mode (Default)
+
 1. You run `codex-agent start "task"`
 2. It creates a detached tmux session
-3. It launches the Codex CLI inside that session
-4. It sends your prompt to Codex
-5. It returns immediately with the job ID
-6. Codex works in the background
+3. It pipes your prompt to `codex exec` via `tee` (for logging)
+4. It returns immediately with the job ID
+5. Codex works in the background and auto-exits when done
+6. The completion marker triggers and the job is marked completed
 7. You check with `jobs --json`, `capture`, `output`, or `attach`
-8. You redirect with `send` if the agent needs course correction
 
-All session output is logged via the `script` command, so results are available even after the session ends. Session metadata is parsed from Codex's JSONL files (`~/.codex/sessions/`) to extract tokens, file modifications, and summaries.
+### Interactive Mode (`--interactive`)
+
+1. You run `codex-agent start "task" --interactive`
+2. It creates a detached tmux session with the Codex TUI
+3. It sends your prompt via tmux send-keys
+4. It returns immediately with the job ID
+5. Codex works in the background
+6. Idle detection monitors for completion (30s grace period → auto `/exit`)
+7. You can redirect with `send` if the agent needs course correction
+
+Session output is logged via `tee` (exec) or `script` (interactive). Session metadata is parsed from Codex's JSONL files (`~/.codex/sessions/`) to extract tokens, file modifications, and summaries.
 
 ## The Claude Code Plugin
 
@@ -247,13 +265,22 @@ See [plugins/codex-orchestrator/README.md](plugins/codex-orchestrator/README.md)
 
 ## Tips
 
-- Use `codex-agent send` to redirect agents - don't kill and respawn
+- Use exec mode (default) for most tasks — it auto-completes and is simpler
+- Use `--interactive` only when you need mid-task `send` communication
+- Use `codex-agent send` to redirect interactive agents — don't kill and respawn
 - Use `jobs --json` to get structured data (tokens, files, summary) in one call
 - Use `--strip-ansi` when capturing output programmatically
 - Use `-r xhigh` for complex tasks that need deep reasoning
 - Use `--map` to give agents codebase context (requires docs/CODEBASE_MAP.md)
 - Use `-s read-only` for research tasks that shouldn't modify files
 - Kill stuck jobs with `codex-agent kill <id>` only as a last resort
+
+## Documentation
+
+- [Usage Guide](docs/usage-guide.md) — Claude Code 使用指南（Skill 模式、手動 CLI、專案階段轉換）
+- [Comparison Guide](docs/codex-orchestrator-vs-opus-standalone.md) — 單獨 Opus 4.6 vs Opus + Codex 編隊
+- [Codebase Map](docs/CODEBASE_MAP.md) — Architecture, modules, data flows
+- [Changelog](CHANGELOG.md) — All changes since fork
 
 ## License
 

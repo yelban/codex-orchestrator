@@ -14,32 +14,26 @@ CLI tool for delegating tasks to GPT Codex agents via tmux sessions. Supports du
 
 ```mermaid
 graph TB
-    subgraph CLI["CLI Layer"]
+    subgraph CLI
         BIN[bin/codex-agent]
-        CLI_TS[src/cli.ts]
+        CLI_TS[cli.ts]
     end
-    subgraph Core["Core"]
-        JOBS[src/jobs.ts]
-        TMUX[src/tmux.ts]
-        CONFIG[src/config.ts]
-        PARSER[src/session-parser.ts]
+    subgraph Core
+        JOBS[jobs.ts]
+        TMUX[tmux.ts]
+        CONFIG[config.ts]
+        PARSER[session-parser.ts]
     end
-    subgraph Utils["Utils"]
-        FILES[src/files.ts]
+    subgraph Utils
+        FILES[files.ts]
     end
-    subgraph External["External"]
+    subgraph External
         TMUX_BIN[tmux]
-        CODEX_EXEC["codex exec"]
-        CODEX_TUI["codex TUI"]
+        CODEX[codex CLI]
     end
-    subgraph Storage["Storage"]
-        JOBS_DIR["~/.codex-agent/jobs/"]
-        CODEX_SESSIONS["~/.codex/sessions/"]
-    end
-    subgraph Plugin["Plugin / Skill"]
-        SKILL[SKILL.md]
-        INSTALL[install.sh]
-        MARKETPLACE[marketplace.json]
+    subgraph Storage
+        JOBS_DIR[~/.codex-agent/jobs/]
+        SESSIONS[~/.codex/sessions/]
     end
 
     BIN --> CLI_TS
@@ -51,10 +45,9 @@ graph TB
     JOBS --> PARSER
     TMUX --> CONFIG
     TMUX --> TMUX_BIN
-    TMUX -->|exec mode| CODEX_EXEC
-    TMUX -->|interactive mode| CODEX_TUI
+    TMUX --> CODEX
     JOBS --> JOBS_DIR
-    PARSER --> CODEX_SESSIONS
+    PARSER --> SESSIONS
 ```
 
 ## Directory Structure
