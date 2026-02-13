@@ -95,7 +95,7 @@ export function createSession(options: {
     } else {
       // Exec mode (default): codex exec auto-completes, pipe through tee for logging
       const approvalFlag = getExecApprovalFlag(options.sandbox);
-      shellCmd = `cat "${promptFile}" | codex exec -m "${options.model}" -s "${options.sandbox}" ${approvalFlag} --json - 2>&1 | tee "${logFile}"; echo "\\n\\n[codex-agent: Session complete. Press Enter to close.]"; read`;
+      shellCmd = `cat "${promptFile}" | codex exec -m "${options.model}" -c model_reasoning_summary="concise" -s "${options.sandbox}" ${approvalFlag} --json - 2>&1 | tee "${logFile}"; echo "\\n\\n[codex-agent: Session complete. Press Enter to close.]"; read`;
     }
 
     execSync(

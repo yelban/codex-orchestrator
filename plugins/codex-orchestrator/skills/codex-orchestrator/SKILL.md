@@ -171,11 +171,126 @@ Detect where you are based on context:
 ## Core Principles
 
 1. **Gold Standard Quality** - No shortcuts. Security, proper patterns, thorough testing - all of it.
-2. **Always Interactive** - Agents stay open for course correction. Never kill and respawn - send a message to redirect.
+2. **Exec by Default, Interactive When Needed** - Use exec mode (auto-completes) for most tasks. Use `--interactive` only when you need mid-task `send` for course correction.
 3. **Parallel Execution** - Multiple Claude instances can spawn multiple Codex agents simultaneously.
 4. **Codebase Map Always** - Every agent gets `--map` for context.
 5. **PRDs Drive Implementation** - Complex changes get PRDs in docs/prds/.
 6. **Patience is Required** - Agents take time. This is normal and expected.
+7. **Constrain Codex 5.3** - Always inject scope and context constraints. Codex 5.3 is fast and eager — it will scope-drift, over-refactor, and skip reading without explicit fencing.
+
+## Writing Effective Agent Prompts (GPT-5.3-Codex)
+
+GPT-5.3-Codex is fast, capable, and eager. It moves quickly and will skip reading, over-refactor, and drift scope if prompts aren't tight. **When composing prompts for agents, always include the relevant constraint blocks below.**
+
+### Mandatory Constraints (include in EVERY agent prompt)
+
+Append these blocks to every prompt you send to Codex agents:
+
+```
+<design_and_scope_constraints>
+- Implement EXACTLY and ONLY what is requested.
+- No extra features, no refactoring of adjacent code, no UX embellishments.
+- If any instruction is ambiguous, choose the simplest valid interpretation.
+- Do NOT modify files or code outside the scope of the task.
+</design_and_scope_constraints>
+
+<context_loading>
+- Read ALL files that will be modified -- in full, not just the sections mentioned in the task.
+- Also read key files they import from or that depend on them.
+- Absorb surrounding patterns, naming conventions, error handling style, and architecture before writing any code.
+- Do not ask clarifying questions about things that are answerable by reading the codebase.
+</context_loading>
+```
+
+### For Multi-File / Complex Tasks (add to the above)
+
+```
+<plan_first>
+- Before writing any code, produce a brief implementation plan:
+  - Files to create vs. modify
+  - Implementation order and prerequisites
+  - Key design decisions and edge cases
+  - Acceptance criteria for "done"
+- Get the plan right first. Then implement step by step following the plan.
+- If the plan is provided externally (e.g., PRD), follow it faithfully.
+</plan_first>
+
+<output_verbosity_spec>
+- Default: 3-6 sentences or <=5 bullets for typical answers.
+- Complex multi-step or multi-file tasks:
+  - 1 short overview paragraph
+  - then <=5 bullets tagged: What changed, Where, Risks, Next steps, Open questions.
+- Avoid long narrative paragraphs; prefer compact bullets and short sections.
+</output_verbosity_spec>
+```
+
+### Verification Criteria
+
+Always tell the agent what "done" looks like. Include acceptance criteria in the prompt:
+
+```
+Verification:
+- [ ] Typecheck passes (bun run typecheck or tsc --noEmit)
+- [ ] No new lint warnings
+- [ ] Existing tests still pass
+- [ ] [task-specific criteria]
+```
+
+### Prompt Composition Example
+
+Instead of a bare prompt like:
+
+```bash
+codex-agent start "Fix the auth bug" --map
+```
+
+Compose a constrained prompt:
+
+```bash
+codex-agent start "Fix the auth bypass bug in src/auth/session.ts where expired tokens are not rejected.
+
+<design_and_scope_constraints>
+- Fix ONLY the token expiration check. Do not refactor surrounding code.
+- If any instruction is ambiguous, choose the simplest valid interpretation.
+</design_and_scope_constraints>
+
+<context_loading>
+- Read src/auth/session.ts, src/auth/jwt.ts, and src/middleware/auth.ts in full before making changes.
+</context_loading>
+
+Verification:
+- [ ] Expired tokens return 401
+- [ ] Valid tokens still work
+- [ ] Existing tests pass" --map
+```
+
+### Reasoning Effort Guide
+
+| Task type | Effort | Flag |
+|---|---|---|
+| Simple code generation, formatting | `medium` | `-r medium` |
+| Standard implementation from clear specs | `high` | `-r high` |
+| Complex refactors, architecture, plan review | `xhigh` | default, no flag needed |
+
+## Exec vs Interactive Mode
+
+Choose the right mode for each task:
+
+| Scenario | Mode | Why |
+|----------|------|-----|
+| Clear single task, no mid-task guidance needed | **exec** (default) | Auto-completes, no TUI overhead |
+| Exploratory research, may need follow-up questions | **interactive** | Can `send` additional prompts |
+| Multi-phase work you want to steer step by step | **interactive** | Course-correct between phases |
+| Parallel batch of independent tasks | **exec** | Fire and forget, check results later |
+
+```bash
+# Exec mode (default) — auto-completes
+codex-agent start "Implement the feature per PRD" --map
+
+# Interactive mode — supports send for course correction
+codex-agent start "Investigate the auth module" --map --interactive
+# Later: codex-agent send <id> "Now check the session handling too"
+```
 
 ## Agent Timing Expectations (CRITICAL - READ THIS)
 
@@ -195,7 +310,9 @@ Detect where you are based on context:
 - They verify their work (typecheck, tests)
 - They handle edge cases
 
-**When you keep talking to an agent via `codex-agent send`**, it stays open and continues working. Sessions can extend to 60+ minutes easily - and that is FINE. A single agent that you course-correct is often better than killing and respawning.
+**For interactive agents (`--interactive`)**: you can keep talking via `codex-agent send`. Sessions can extend to 60+ minutes easily - and that is FINE. A single agent that you course-correct is often better than killing and respawning.
+
+**For exec agents (default)**: they auto-complete and exit. If the result isn't right, spawn a new agent with a refined prompt that includes context about what the previous attempt got wrong.
 
 **Do NOT:**
 - Kill agents just because they have been running for 20 minutes
@@ -347,12 +464,30 @@ Even seemingly simple tasks go to Codex agents - remember, you are the orchestra
 
 ### Stage 2: Research (Codex Agents - read-only)
 
-Spawn parallel investigation agents:
+Spawn parallel investigation agents. Use exec mode (default) for focused research:
 
 ```bash
-codex-agent start "Map the data flow from API to database for user creation" --map -s read-only
-codex-agent start "Identify all places where user validation occurs" --map -s read-only
-codex-agent start "Find security vulnerabilities in user input handling" --map -s read-only
+codex-agent start "Map the data flow from API to database for user creation.
+
+<context_loading>
+- Read all relevant route handlers, service files, and database models in full.
+- Trace the complete request lifecycle from HTTP handler to DB query.
+</context_loading>
+
+<design_and_scope_constraints>
+- Report findings only. Do not suggest refactoring or improvements unless explicitly asked.
+- If any instruction is ambiguous, choose the simplest valid interpretation.
+</design_and_scope_constraints>" --map -s read-only
+
+codex-agent start "Identify all places where user validation occurs.
+
+<context_loading>
+- Search the entire codebase for validation patterns, not just obvious locations.
+</context_loading>
+
+<design_and_scope_constraints>
+- List findings with file paths and line references. No code modifications.
+</design_and_scope_constraints>" --map -s read-only
 ```
 
 Log each spawn immediately in agents.log.
@@ -415,10 +550,29 @@ Review PRD with user before implementation.
 
 ### Stage 5: Implementation (Codex Agents - workspace-write)
 
-Spawn implementation agents with PRD context:
+Spawn implementation agents with PRD context and constraints:
 
 ```bash
-codex-agent start "Implement Phase 1 of docs/prds/auth-refactor.md. Read the PRD first." --map -f "docs/prds/auth-refactor.md"
+codex-agent start "Implement Phase 1 of docs/prds/auth-refactor.md.
+
+<context_loading>
+- Read the PRD in full first.
+- Read ALL files listed in the PRD's 'Files to Modify' section before writing any code.
+</context_loading>
+
+<design_and_scope_constraints>
+- Implement EXACTLY what Phase 1 specifies. Do not start Phase 2 work.
+- Do not refactor existing code outside the scope of the PRD.
+</design_and_scope_constraints>
+
+<plan_first>
+- Before writing code, list the files you will modify and the order of changes.
+</plan_first>
+
+Verification:
+- [ ] Typecheck passes
+- [ ] Existing tests still pass
+- [ ] All Phase 1 tasks from PRD are completed" --map -f "docs/prds/auth-refactor.md"
 ```
 
 For large PRDs, implement in phases with separate agents.
@@ -578,7 +732,17 @@ Before marking any stage complete:
 
 ## Error Recovery
 
-### Agent Stuck
+### Agent Stuck (exec mode)
+
+```bash
+codex-agent jobs --json           # check status
+codex-agent capture <jobId> 100   # see what's happening
+codex-agent kill <jobId>          # kill and respawn with refined prompt
+```
+
+Exec agents can't receive messages. If stuck, kill and spawn a new one with a better prompt.
+
+### Agent Stuck (interactive mode)
 
 ```bash
 codex-agent jobs --json           # check status
@@ -590,16 +754,17 @@ codex-agent kill <jobId>          # only if truly stuck
 ### Agent Didn't Get Message
 
 If `codex-agent send` doesn't seem to work:
-1. Check agent is still running: `codex-agent jobs --json`
-2. Agent might be "thinking" - wait a moment
-3. Try sending again with clearer instruction
-4. Attach directly: `tmux attach -t codex-agent-<jobId>`
+1. Verify the job was started with `--interactive` (exec jobs don't support send)
+2. Check agent is still running: `codex-agent jobs --json`
+3. Agent might be "thinking" - wait a moment
+4. Try sending again with clearer instruction
+5. Attach directly: `tmux attach -t codex-agent-<jobId>`
 
 ### Implementation Failed
 
 1. Check the error in output
 2. Don't retry with the same prompt
-3. Mutate the approach - add context about what failed
+3. Mutate the approach - add context about what failed and include tighter constraint blocks
 4. Consider splitting into smaller tasks
 
 ## Post-Compaction Recovery
