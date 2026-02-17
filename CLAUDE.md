@@ -83,9 +83,19 @@ plugins/codex-orchestrator/
 
 ```
 ~/.codex-agent/jobs/
-  <jobId>.json    # Job metadata (status, model, timestamps)
-  <jobId>.prompt  # Original prompt text
-  <jobId>.log     # Full terminal output from script command
+  <jobId>.json           # Job metadata (status, model, timestamps, turn tracking)
+  <jobId>.prompt         # Original prompt text
+  <jobId>.log            # Full terminal output from script command
+  <jobId>.turn-complete  # Signal file from notify hook (transient)
 ```
 
 Job IDs: 8 random hex chars. Session names: `codex-agent-<jobId>`.
+
+## Claude Orchestration Pattern (Persisted)
+
+- Use `codex-agent start "<task>"` without `--wait` for background orchestration.
+- Track job IDs immediately.
+- Use `codex-agent await-turn <id>` to block until agent finishes current turn (preferred).
+- Use `codex-agent status <id>` to check running/completed state.
+- Use `codex-agent capture <id> [n]` for incremental tails while running.
+- Use `codex-agent output <id>` for final transcript after completion.

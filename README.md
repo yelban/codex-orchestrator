@@ -106,6 +106,7 @@ This creates `docs/CODEBASE_MAP.md`. After that, every `codex-agent start ... --
 ```bash
 # Start an agent (exec mode — auto-completes when done)
 codex-agent start "Review this codebase for security vulnerabilities" --map
+codex-agent start "Refactor auth module" --wait --notify-on-complete 'printf "\033[0;32mCodex agent done\033[0m\n"'
 
 # Start in interactive mode (supports send for mid-task redirection)
 codex-agent start "Analyze the auth module" --map --interactive
@@ -143,12 +144,15 @@ codex-agent send <jobId> "Focus on the authentication module instead"
 | Option | Description |
 |--------|-------------|
 | `-r, --reasoning <level>` | Reasoning effort: `low`, `medium`, `high`, `xhigh` |
-| `-m, --model <model>` | Model name (default: gpt-5.3-codex) |
+| `-m, --model <model>` | Model name (default: gpt-5.3-codex-spark) |
+| `-w, --wait` | Wait for completion and emit a ping when done |
+| `--notify-on-complete <cmd>` | Shell command to run when the job completes |
 | `-s, --sandbox <mode>` | `read-only`, `workspace-write`, `danger-full-access` |
 | `-f, --file <glob>` | Include files matching glob (repeatable) |
 | `-d, --dir <path>` | Working directory |
 | `--map` | Include codebase map (docs/CODEBASE_MAP.md) |
-| `--strip-ansi` | Remove terminal control codes from output |
+| `--strip-ansi` | Remove ANSI control codes and Codex TUI noise from output |
+| `--clean` | Alias for `--strip-ansi` |
 | `--json` | Output JSON (jobs command only) |
 | `--interactive` | Use interactive TUI mode (supports send, idle detection) |
 | `--dry-run` | Preview prompt without executing |
@@ -269,7 +273,7 @@ See [plugins/codex-orchestrator/README.md](plugins/codex-orchestrator/README.md)
 - Use `--interactive` only when you need mid-task `send` communication
 - Use `codex-agent send` to redirect interactive agents — don't kill and respawn
 - Use `jobs --json` to get structured data (tokens, files, summary) in one call
-- Use `--strip-ansi` when capturing output programmatically
+- Use `--strip-ansi` (or `--clean`) to get parse-friendly output with ANSI and TUI chrome removed
 - Use `-r xhigh` for complex tasks that need deep reasoning
 - Use `--map` to give agents codebase context (requires docs/CODEBASE_MAP.md)
 - Use `-s read-only` for research tasks that shouldn't modify files

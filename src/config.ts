@@ -2,7 +2,7 @@
 
 export const config = {
   // Default model
-  model: "gpt-5.3-codex",
+  model: "gpt-5.3-codex-spark",
 
   // Reasoning effort levels
   reasoningEfforts: ["low", "medium", "high", "xhigh"] as const,

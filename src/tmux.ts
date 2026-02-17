@@ -72,6 +72,7 @@ export function createSession(options: {
 }): { sessionName: string; success: boolean; error?: string } {
   const sessionName = getSessionName(options.jobId);
   const logFile = `${config.jobsDir}/${options.jobId}.log`;
+  const notifyHook = `${import.meta.dir}/notify-hook.ts`;
 
   // Create prompt file to avoid shell escaping issues
   const promptFile = `${config.jobsDir}/${options.jobId}.prompt`;
@@ -82,11 +83,12 @@ export function createSession(options: {
     let shellCmd: string;
 
     if (options.interactive) {
-      // Interactive mode: use codex TUI (supports send, needs idle detection)
+      // Interactive mode: use codex TUI (supports send, idle detection, notify hook)
       const codexArgs = [
         `-c`, `model="${options.model}"`,
         `-c`, `model_reasoning_effort="${options.reasoningEffort}"`,
         `-c`, `skip_update_check=true`,
+        `-c`, `'\\''notify=["bun","run","${notifyHook}","${options.jobId}"]'\\''`,
         `-a`, `never`,
         `-s`, options.sandbox,
       ].join(" ");

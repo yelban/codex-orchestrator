@@ -17,6 +17,7 @@ import {
   sendControl,
   isCodexIdle,
 } from "./tmux.ts";
+import { clearSignalFile, signalFileExists, readSignalFile, type TurnEvent } from "./watcher.ts";
 
 export interface Job {
   id: string;
@@ -36,6 +37,11 @@ export interface Job {
   interactive?: boolean;
   idleDetectedAt?: string;
   exitSent?: boolean;
+  // Turn tracking
+  turnCount?: number;
+  lastTurnCompletedAt?: string;
+  lastAgentMessage?: string;
+  turnState?: "working" | "idle" | "context_limit";
 }
 
 function ensureJobsDir(): void {
@@ -216,11 +222,14 @@ export function deleteJob(jobId: string): boolean {
 
   try {
     unlinkSync(getJobPath(jobId));
-    // Clean up prompt file if exists
-    try {
-      unlinkSync(join(config.jobsDir, `${jobId}.prompt`));
-    } catch {
-      // Prompt file may not exist
+    // Clean up auxiliary files
+    const auxiliaryExtensions = [".prompt", ".log", ".turn-complete"];
+    for (const ext of auxiliaryExtensions) {
+      try {
+        unlinkSync(join(config.jobsDir, `${jobId}${ext}`));
+      } catch {
+        // File may not exist
+      }
     }
     return true;
   } catch {
@@ -274,6 +283,7 @@ export function startJob(options: StartJobOptions): Job {
     job.status = "running";
     job.startedAt = new Date().toISOString();
     job.tmuxSession = result.sessionName;
+    job.turnState = "working";
   } else {
     job.status = "failed";
     job.error = result.error || "Failed to create tmux session";
@@ -293,6 +303,7 @@ export function killJob(jobId: string): boolean {
     killSession(job.tmuxSession);
   }
 
+  clearSignalFile(jobId);
   job.status = "failed";
   job.error = "Killed by user";
   job.completedAt = new Date().toISOString();
@@ -308,15 +319,17 @@ export function sendToJob(jobId: string, message: string): { sent: boolean; erro
     return { sent: false, error: "Cannot send to non-interactive (exec mode) job. Use --interactive when starting the job." };
   }
 
-  // Clear idle detection state when sending a new message
-  if (job.idleDetectedAt || job.exitSent) {
-    job.idleDetectedAt = undefined;
-    job.exitSent = undefined;
-    saveJob(job);
-  }
-
   const ok = sendMessage(job.tmuxSession, message);
-  return ok ? { sent: true } : { sent: false, error: "Failed to send message to tmux session" };
+  if (!ok) return { sent: false, error: "Failed to send message to tmux session" };
+
+  // Clear idle detection state and turn-complete signal when sending a new message
+  job.idleDetectedAt = undefined;
+  job.exitSent = undefined;
+  clearSignalFile(jobId);
+  job.turnState = "working";
+  saveJob(job);
+
+  return { sent: true };
 }
 
 export function sendControlToJob(jobId: string, key: string): boolean {
@@ -461,6 +474,14 @@ export function refreshJobStatus(jobId: string): Job | null {
   }
 
   return loadJob(jobId);
+}
+
+export function isJobIdle(jobId: string): boolean {
+  return signalFileExists(jobId);
+}
+
+export function getTurnSignal(jobId: string): TurnEvent | null {
+  return readSignalFile(jobId);
 }
 
 export function getAttachCommand(jobId: string): string | null {
