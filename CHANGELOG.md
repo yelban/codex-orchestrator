@@ -1,8 +1,28 @@
 # Changelog
 
-## [Unreleased] — P1 improvements
+## [Unreleased] — P2 architecture modernization
 
-*In progress*
+*Not started*
+
+## [1.2.0] — 2026-02-17 — P1 Bug Fixes + UX
+
+### Fixed
+
+- **Watch command rewrite**: Replaced broken `output.replace(lastOutput, "")` diff with log-file byte-offset tracking — eliminates duplicate/spam output when tmux scrollback changes
+- **Idle detection regex**: Tightened from `clean.includes("? for shortcuts")` (anywhere in last 10 lines) to line-start match in last 5 lines only — prevents false positives from prompt content or code comments
+- **Send/exit race condition**: `sendToJob` now rejects sends when `/exit` is already in transit (`exitSent=true`), preventing messages into a closing session
+- **ANSI stripping in session-parser**: Removed broken `/[\d;]*m/g` pattern (missing `\x1b` prefix) that corrupted normal code like `[1m]`; replaced with proper OSC sequence handler
+
+### Added
+
+- **`--keep-alive` flag**: Disables idle auto-exit for interactive jobs (implies `--interactive`); for multi-turn sessions that need manual `send` without auto-close
+- **Enrichment caching**: `jobs --json` caches parsed session metadata (tokens, files, summary) in job JSON on first access — subsequent calls skip recursive `~/.codex/sessions/` scan
+- **Mode-specific timeouts**: Exec mode: 60 minutes (unchanged); Interactive mode: 120 minutes (new `interactiveTimeout` config)
+
+### Changed
+
+- **SKILL.md**: Added trivial-task bypass (Rule 3: <50 lines, single file → use native tools, skip Codex); removed shared `agents.log` guidance (race-condition prone); added review→fix→re-review loop for critical findings
+- **Job interface**: Added `keepAlive`, `enrichment` optional fields (backward compatible)
 
 ## [1.1.0] — 2026-02-17 — P0 Critical Fixes
 

@@ -40,22 +40,22 @@ bin/codex-agent (shell wrapper)
 
 **Data flow (interactive mode, `--interactive`)**: `start` writes prompt to `.prompt` file → generates OS-aware launcher `.sh` script → creates detached tmux session → launcher starts `codex` TUI via `script` (BSD/GNU auto-detected) → prompt sent via `send-keys` (or `load-buffer` for >5000 chars) → returns job ID. Idle detection monitors for completion (30s grace period). Output retrieval tries tmux pane capture first, falls back to `.log` file.
 
-**Job enrichment** (`jobs --json`): For completed jobs, `session-parser.ts` extracts the Codex session ID from the log file, finds the corresponding JSONL in `~/.codex/sessions/`, and parses token usage, modified files (from `apply_patch` tool calls), and last assistant message as summary.
+**Job enrichment** (`jobs --json`): For completed jobs, enrichment data (tokens, files, summary) is cached in the job JSON after first parse. On first access, `session-parser.ts` extracts the Codex session ID from the log file, finds the corresponding JSONL in `~/.codex/sessions/`, and parses the data. Subsequent calls read from cache, skipping the recursive directory scan.
 
 ## Key Behaviors & Gotchas
 
 - **Dual modes**: Default `exec` mode uses `codex exec` (auto-completes, no send). `--interactive` uses TUI (supports send, idle detection)
 - **Completion detection (exec)**: `codex exec` exits naturally → marker string `[codex-agent: Session complete` appears → job completed
-- **Completion detection (interactive)**: Idle detection — `? for shortcuts` pattern in pane + log mtime stable for 30s → auto-sends `/exit`
-- **Idle detection safety**: 30s grace period, log mtime stability check, `exitSent` flag prevents duplicates, false positive recovery when codex resumes
-- **send command**: Only works for `--interactive` jobs; exec mode jobs reject send with error message
+- **Completion detection (interactive)**: Idle detection — `? for shortcuts` pattern matched at line start in last 5 pane lines + log mtime stable for 30s → auto-sends `/exit`
+- **Idle detection safety**: 30s grace period, log mtime stability check, `exitSent` flag prevents duplicates, false positive recovery when codex resumes; `--keep-alive` disables auto-exit entirely
+- **send command**: Only works for `--interactive` jobs; exec mode jobs reject send with error; also blocked when `/exit` already sent
 - **Launcher scripts**: Each job generates a `.sh` launcher script; tmux runs `bash <launcher>` — user prompts never embedded in shell commands
 - **Argv-safe execution**: All tmux commands use `spawnSync` with argv arrays (no shell interpolation)
 - **Atomic writes**: All JSON/signal file writes use temp-file + `renameSync` pattern (via `src/fs-utils.ts`)
 - **Crash detection**: When tmux session disappears, log is checked for completion marker; no marker = `failed` status
 - **Hardcoded delays**: Interactive mode uses `sleep` (0.3–1s) between tmux commands for TUI sync — fragile but necessary
 - **Shell quoting in launchers**: `shellQuote()` function uses standard `'\''` technique for safe embedding in bash scripts
-- **Inactivity timeout**: Running jobs with no log file activity for 60 minutes are auto-killed (fallback for both modes)
+- **Inactivity timeout**: Exec mode: 60 min, interactive mode: 120 min — auto-killed on log inactivity
 - **Log files**: Contain ANSI terminal codes; use `--strip-ansi` for clean output
 - **50MB buffer limit**: `captureFullHistory` maxBuffer is 50MB
 
@@ -81,6 +81,7 @@ plugins/codex-orchestrator/
 | defaultTimeout | 60 minutes |
 | idleDetectionEnabled | `true` |
 | idleGracePeriodSeconds | `30` |
+| interactiveTimeout | 120 minutes |
 | maxFileCount | `200` |
 | defaultExcludes | `node_modules, .git, dist, .codex, .next, __pycache__` |
 | jobsDir | `~/.codex-agent/jobs/` |
