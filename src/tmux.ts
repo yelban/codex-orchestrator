@@ -254,16 +254,23 @@ function sendPromptToSession(
 // ---------- idle detection ----------
 
 /**
- * Check if a codex interactive session is idle (waiting for input)
+ * Check if a codex interactive session is idle (waiting for input).
+ * Only matches `? for shortcuts` when it appears as a standalone prompt
+ * in the last few lines — not embedded in code, comments, or prompts.
  */
 export function isCodexIdle(sessionName: string): boolean {
-  const output = capturePane(sessionName, { lines: 10 });
+  const output = capturePane(sessionName, { lines: 5 });
   if (!output) return false;
   // Strip ANSI codes for reliable pattern matching
   const clean = output
     .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "")
     .replace(/\x1b\][^\x07]*\x07/g, "");
-  return clean.includes("? for shortcuts");
+  // Check last 5 lines for the idle prompt — must be at line start (after optional whitespace/glyphs)
+  const lines = clean.split("\n").slice(-5);
+  return lines.some((line) => {
+    const trimmed = line.trim();
+    return trimmed === "? for shortcuts" || /^[>›\s]*\?\s+for shortcuts/.test(trimmed);
+  });
 }
 
 // ---------- message sending ----------

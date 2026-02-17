@@ -39,11 +39,19 @@ export interface Job {
   interactive?: boolean;
   idleDetectedAt?: string;
   exitSent?: boolean;
+  keepAlive?: boolean;
   // Turn tracking
   turnCount?: number;
   lastTurnCompletedAt?: string;
   lastAgentMessage?: string;
   turnState?: "working" | "idle" | "context_limit";
+  // Cached enrichment data (written once after completion)
+  enrichment?: {
+    tokens: ParsedSessionData["tokens"];
+    filesModified: string[] | null;
+    summary: string | null;
+    enrichedAt: string;
+  };
 }
 
 function ensureJobsDir(): void {
@@ -122,7 +130,7 @@ function getLastActivityMs(job: Job): number | null {
 }
 
 function isInactiveTimedOut(job: Job): boolean {
-  const timeoutMinutes = config.defaultTimeout;
+  const timeoutMinutes = job.interactive ? config.interactiveTimeout : config.defaultTimeout;
   if (!Number.isFinite(timeoutMinutes) || timeoutMinutes <= 0) return false;
 
   const lastActivityMs = getLastActivityMs(job);
@@ -183,11 +191,26 @@ export function getJobsJson(): JobsJsonOutput {
     let summary: string | null = null;
 
     if (effective.status === "completed") {
-      const sessionData = loadSessionData(effective.id);
-      if (sessionData) {
-        tokens = sessionData.tokens;
-        filesModified = sessionData.files_modified;
-        summary = sessionData.summary ? truncateText(sessionData.summary, 500) : null;
+      if (effective.enrichment) {
+        // Use cached enrichment data (avoids repeated session file scans)
+        tokens = effective.enrichment.tokens;
+        filesModified = effective.enrichment.filesModified;
+        summary = effective.enrichment.summary;
+      } else {
+        // First time: parse session data and cache in job JSON
+        const sessionData = loadSessionData(effective.id);
+        if (sessionData) {
+          tokens = sessionData.tokens;
+          filesModified = sessionData.files_modified;
+          summary = sessionData.summary ? truncateText(sessionData.summary, 500) : null;
+          effective.enrichment = {
+            tokens: sessionData.tokens,
+            filesModified: sessionData.files_modified,
+            summary: sessionData.summary ? truncateText(sessionData.summary, 500) : null,
+            enrichedAt: new Date().toISOString(),
+          };
+          saveJob(effective);
+        }
       }
     }
 
@@ -247,6 +270,7 @@ export interface StartJobOptions {
   parentSessionId?: string;
   cwd?: string;
   interactive?: boolean;
+  keepAlive?: boolean;
 }
 
 export function startJob(options: StartJobOptions): Job {
@@ -266,6 +290,7 @@ export function startJob(options: StartJobOptions): Job {
     cwd,
     createdAt: new Date().toISOString(),
     interactive: options.interactive || false,
+    keepAlive: options.keepAlive || false,
   };
 
   saveJob(job);
@@ -319,6 +344,10 @@ export function sendToJob(jobId: string, message: string): { sent: boolean; erro
 
   if (!job.interactive) {
     return { sent: false, error: "Cannot send to non-interactive (exec mode) job. Use --interactive when starting the job." };
+  }
+
+  if (job.exitSent) {
+    return { sent: false, error: "Session is closing (/exit already sent). Start a new job instead, or use --keep-alive to prevent auto-exit." };
   }
 
   const ok = sendMessage(job.tmuxSession, message);
@@ -444,7 +473,7 @@ export function refreshJobStatus(jobId: string): Job | null {
         // Store bounded preview (full output available via log file or tmux capture)
         job.resultPreview = output.slice(-500);
         saveJob(job);
-      } else if (job.interactive && config.idleDetectionEnabled && !job.exitSent) {
+      } else if (job.interactive && config.idleDetectionEnabled && !job.exitSent && !job.keepAlive) {
         // Idle detection for interactive jobs only
         const idle = isCodexIdle(job.tmuxSession);
 

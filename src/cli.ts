@@ -3,6 +3,8 @@
 // Codex Agent CLI - Delegate tasks to GPT Codex agents with tmux integration
 // Designed for Claude Code orchestration with bidirectional communication
 
+import { openSync, readSync, closeSync, statSync } from "fs";
+import { join } from "path";
 import { config, ReasoningEffort, SandboxMode } from "./config.ts";
 import {
   startJob,
@@ -54,6 +56,7 @@ Options:
   -f, --file <glob>          Include files matching glob (can repeat)
   -d, --dir <path>           Working directory (default: cwd)
   --interactive              Use interactive TUI mode (supports send, idle detection)
+  --keep-alive               Disable auto-exit for interactive jobs (for multi-turn use)
   --parent-session <id>      Parent session ID for linkage
   --map                      Include codebase map if available
   --dry-run                  Show prompt without executing
@@ -97,6 +100,7 @@ interface Options {
   files: string[];
   dir: string;
   interactive: boolean;
+  keepAlive: boolean;
   includeMap: boolean;
   parentSessionId: string | null;
   dryRun: boolean;
@@ -120,6 +124,7 @@ function parseArgs(args: string[]): {
     files: [],
     dir: process.cwd(),
     interactive: false,
+    keepAlive: false,
     includeMap: false,
     parentSessionId: null,
     dryRun: false,
@@ -169,6 +174,9 @@ function parseArgs(args: string[]): {
       options.dir = args[++i];
     } else if (arg === "--interactive") {
       options.interactive = true;
+    } else if (arg === "--keep-alive") {
+      options.keepAlive = true;
+      options.interactive = true; // keep-alive implies interactive
     } else if (arg === "--parent-session") {
       options.parentSessionId = args[++i] ?? null;
     } else if (arg === "--map") {
@@ -352,6 +360,7 @@ async function handleStartCommand(
     parentSessionId: options.parentSessionId ?? undefined,
     cwd: options.dir,
     interactive: options.interactive,
+    keepAlive: options.keepAlive,
   });
 
   const mode = job.interactive ? "interactive" : "exec";
@@ -661,21 +670,39 @@ async function main() {
         console.error("For interactive mode, use: tmux attach -t " + job.tmuxSession);
         console.error("");
 
-        // Simple polling-based watch
-        let lastOutput = "";
+        // Log-file byte-offset tracking to avoid duplicate output
+        const logPath = join(config.jobsDir, `${positional[0]}.log`);
+        let logOffset = 0;
+        // Start from current size (don't dump existing content)
+        try {
+          logOffset = statSync(logPath).size;
+        } catch {
+          // Log file may not exist yet
+        }
+
         const pollInterval = setInterval(() => {
-          const output = getJobOutput(positional[0], 100);
-          if (output && output !== lastOutput) {
-            // Print only new content
-            if (lastOutput) {
-              const newPart = output.replace(lastOutput, "");
-              if (newPart.trim()) {
-                process.stdout.write(newPart);
+          // Read new bytes from log file
+          try {
+            const currentSize = statSync(logPath).size;
+            if (currentSize > logOffset) {
+              const fd = openSync(logPath, "r");
+              try {
+                const buf = Buffer.alloc(Math.min(currentSize - logOffset, 64 * 1024));
+                readSync(fd, buf, 0, buf.length, logOffset);
+                let chunk = buf.toString("utf-8");
+                if (options.stripAnsi) {
+                  chunk = cleanTerminalOutput(chunk);
+                }
+                if (chunk.trim()) {
+                  process.stdout.write(chunk);
+                }
+              } finally {
+                closeSync(fd);
               }
-            } else {
-              console.log(output);
+              logOffset = currentSize;
             }
-            lastOutput = output;
+          } catch {
+            // Log file may not exist yet or be briefly unavailable during atomic write
           }
 
           // Check if job is still running

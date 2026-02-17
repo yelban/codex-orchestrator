@@ -82,7 +82,23 @@ Not your job:
 - Doing extensive file reads to "understand before delegating"
 - Using Claude subagents (Task tool) unless the user explicitly asks
 
-### Rule 3: Only Exceptions
+### Rule 3: Trivial Task Bypass
+
+For changes that are **< 50 lines in a single file** with clear requirements (typo fix, config tweak, simple rename), **use your native tools directly**. Do NOT spawn a Codex agent for trivial work — it adds 10-20 minutes of overhead for a 30-second edit.
+
+Examples of trivial tasks (do yourself):
+- Fix a typo in a comment or string
+- Add/remove a single import
+- Change a config value
+- Rename a variable in one file
+
+Examples of non-trivial tasks (spawn Codex):
+- Any multi-file change
+- Changes requiring understanding of data flow
+- Security-sensitive modifications
+- Anything touching tests
+
+### Rule 4: Only Exceptions for Claude Subagents
 
 Use Claude subagents ONLY when:
 - The user explicitly requests it ("you do it", "don't use Codex", "use a Claude subagent")
@@ -616,8 +632,6 @@ codex-agent start "Identify all places where user validation occurs.
 </design_and_scope_constraints>" --map -s read-only
 ```
 
-Log each spawn immediately in agents.log.
-
 ### Stage 3: Synthesis (You)
 
 Review agent findings. This is where you add value as the orchestrator:
@@ -633,8 +647,6 @@ Review agent findings. This is where you add value as the orchestrator:
 - What's the actual state of the code?
 - What are the real problems?
 - What's the right approach?
-
-Write synthesis to agents.log.
 
 ### Stage 4: PRD Creation (You + User)
 
@@ -734,10 +746,37 @@ codex-agent start "Review for data integrity. Check:
 Report any concerns." --map -s read-only
 ```
 
-**After review agents complete:**
-- Synthesize findings
-- Fix any critical issues before commit
-- Note non-critical issues for future
+**After review agents complete — Review → Fix Loop:**
+
+1. Synthesize findings into categories: **Critical** (must fix), **Important** (should fix), **Minor** (note for later)
+2. For each **Critical** finding, spawn a new implementation agent with:
+   - The specific finding as context
+   - The original PRD reference
+   - Explicit constraint: fix ONLY this issue
+3. After fix agents complete, spawn a **verification** review agent to confirm the fixes
+4. Repeat until no Critical findings remain
+5. Note Important/Minor findings in a tracking file for future work
+
+```bash
+# Example: Review found SQL injection in auth module
+codex-agent start "Fix SQL injection vulnerability found in src/auth/query.ts:45.
+Review finding: User input is concatenated into SQL query without parameterization.
+
+<design_and_scope_constraints>
+- Fix ONLY the SQL injection in the identified location.
+- Use parameterized queries matching the existing pattern in src/db/base-query.ts.
+- Do not refactor other queries or add new abstractions.
+</design_and_scope_constraints>
+
+<context_loading>
+- Read src/auth/query.ts and src/db/base-query.ts in full.
+</context_loading>
+
+Verification:
+- [ ] Query uses parameterized input
+- [ ] Existing tests pass
+- [ ] No other queries modified" --map
+```
 
 ### Stage 7: Testing (Codex Agents - workspace-write)
 
@@ -764,58 +803,21 @@ USER runs 4 Claude instances simultaneously
 
 When running multiple Claude Code sessions on the same codebase:
 1. Each Claude instance spawns and manages its own agents independently
-2. All instances share the same `agents.log` for coordination
+2. Use `codex-agent jobs --json` to see all agents across instances
 3. Use job IDs to track which agent belongs to which Claude instance
-4. Coordinate via agents.log entries to avoid duplicate work
-5. Each Claude should claim a stage or module to prevent conflicts
+4. Each Claude should claim a stage or module to prevent conflicts
 
 This is how you get exponential execution: N Claude instances x M Codex agents each = N*M parallel workers on your codebase.
 
-## agents.log Format
+## Agent Tracking
 
-Maintain in project root. Shared across all Claude instances.
+All agent state is stored per-job in `~/.codex-agent/jobs/` (one JSON + log file per agent). Use `codex-agent jobs --json` for a unified view across all instances.
 
-```markdown
-# Agents Log
-
-## Session: 2026-01-21T10:30:00Z
-Goal: Refactor authentication system
-PRD: docs/prds/auth-refactor.md
-
-### Spawned: abc123 - 10:31
-Type: research
-Prompt: Investigate current auth flow, identify security gaps
-Reasoning: xhigh
-Sandbox: read-only
-
-### Spawned: def456 - 10:31
-Type: research
-Prompt: Analyze session management patterns
-Reasoning: xhigh
-Sandbox: read-only
-
-### Complete: abc123 - 10:45
-Findings:
-- JWT tokens stored in localStorage (XSS risk)
-- No refresh token rotation
-- Missing rate limiting on login endpoint
-Files: src/auth/jwt.ts, src/auth/session.ts
-
-### Complete: def456 - 10:47
-Findings:
-- Sessions never expire
-- No concurrent session limits
-Files: src/auth/session.ts, src/middleware/auth.ts
-
-### Synthesis - 10:50
-Combined: Auth system has 4 critical issues:
-1. XSS-vulnerable token storage
-2. No token rotation
-3. No rate limiting
-4. Infinite sessions
-Approach: Create PRD with phased fix
-Next: Write PRD to docs/prds/auth-security-hardening.md
-```
+**Do NOT maintain a shared `agents.log` file.** Multiple Claude instances writing to the same file causes race conditions and data loss. Instead:
+- Use `codex-agent jobs --json` to check all agent status
+- Use `codex-agent status <id>` for individual agent details (turn state, last message)
+- Use `codex-agent capture <id> --clean` to read agent output
+- Communicate findings to the user directly in conversation
 
 ## Multi-Agent Patterns
 
@@ -861,7 +863,7 @@ Before marking any stage complete:
 
 | Stage | Gate |
 |-------|------|
-| Research | Findings documented in agents.log |
+| Research | Findings reviewed via `codex-agent status/capture` |
 | Synthesis | Clear understanding, contradictions resolved |
 | PRD | User reviewed and approved |
 | Implementation | Typecheck passes, no new errors |
@@ -910,31 +912,21 @@ If `codex-agent send` doesn't seem to work:
 After Claude's context compacts, immediately:
 
 ```bash
-# Check agents.log for state
-# (Read agents.log in project root)
-
-# Check running agents
+# Check all running and completed agents
 codex-agent jobs --json
+
+# Check specific agent status
+codex-agent status <jobId>
 ```
 
-Read the log. Understand current stage. Resume from where you left off.
+Review agent statuses. Understand current stage. Resume from where you left off.
 
 ## When NOT to Use This Pipeline
 
-Basically never. Codex agents are the default for all execution work.
-
-**The ONLY exceptions:**
+Skip Codex agents when:
 - The user explicitly says "you do it" or "don't use Codex"
 - Pure conversation/discussion (no code, no files)
 - You need to read a single file to understand context for the conversation
+- **Trivial changes** (< 50 lines, single file, clear requirements) — use your native tools directly (see Rule 3)
 
-**Everything else goes to Codex agents**, including:
-- "Simple" single file changes
-- "Quick" bug fixes
-- Tasks you think you could handle yourself
-
-Why? Because:
-1. Your job is orchestration, not implementation
-2. Codex agents are specialized for coding work
-3. This frees you to continue strategic discussion with the user
-4. It's more efficient - agents work while you talk
+**Everything else goes to Codex agents.** Even tasks you think you could handle yourself — your job is orchestration, not implementation. Codex agents are specialized for coding work, and delegating frees you to continue strategic discussion with the user.

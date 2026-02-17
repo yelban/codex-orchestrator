@@ -192,8 +192,9 @@ function parseJsonSession(content: string): ParsedSessionData | null {
 }
 
 function stripAnsiCodes(text: string): string {
-  // Remove ANSI escape sequences
-  return text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\[[\d;]*m/g, '');
+  return text
+    .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')    // CSI sequences (e.g., \x1b[31m)
+    .replace(/\x1b\][^\x07]*\x07/g, '');       // OSC sequences (e.g., \x1b]title\x07)
 }
 
 export function extractSessionId(logContent: string): string | null {
