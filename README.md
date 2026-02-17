@@ -223,8 +223,8 @@ codex-agent start "Understand the architecture" --map -r high
 ### Exec Mode (Default)
 
 1. You run `codex-agent start "task"`
-2. It creates a detached tmux session
-3. It pipes your prompt to `codex exec` via `tee` (for logging)
+2. CLI generates a launcher script and creates a detached tmux session
+3. The launcher pipes your prompt (from file) to `codex exec` via `tee` (for logging)
 4. It returns immediately with the job ID
 5. Codex works in the background and auto-exits when done
 6. The completion marker triggers and the job is marked completed
@@ -233,14 +233,16 @@ codex-agent start "Understand the architecture" --map -r high
 ### Interactive Mode (`--interactive`)
 
 1. You run `codex-agent start "task" --interactive`
-2. It creates a detached tmux session with the Codex TUI
-3. It sends your prompt via tmux send-keys
-4. It returns immediately with the job ID
-5. Codex works in the background
+2. CLI generates a launcher script with OS-appropriate `script` invocation
+3. A detached tmux session starts the Codex TUI
+4. Your prompt is sent via `send-keys` (or `load-buffer` for >5000 chars)
+5. It returns immediately with the job ID
 6. Idle detection monitors for completion (30s grace period → auto `/exit`)
 7. You can redirect with `send` if the agent needs course correction
 
 Session output is logged via `tee` (exec) or `script` (interactive). Session metadata is parsed from Codex's JSONL files (`~/.codex/sessions/`) to extract tokens, file modifications, and summaries.
+
+All tmux commands use argv arrays (no shell interpolation). User prompts are read from files, never embedded in commands.
 
 ## The Claude Code Plugin
 
@@ -261,11 +263,21 @@ See [plugins/codex-orchestrator/README.md](plugins/codex-orchestrator/README.md)
 ## Job Storage
 
 ```
-~/.codex-agent/jobs/
-  <jobId>.json    # Job metadata
-  <jobId>.prompt  # Original prompt
-  <jobId>.log     # Full terminal output
+~/.codex-agent/jobs/          # Directory created with 0o700 permissions
+  <jobId>.json                # Job metadata (atomic writes, 0o600)
+  <jobId>.prompt              # Original prompt text
+  <jobId>.log                 # Full terminal output
+  <jobId>.sh                  # Launcher script (exec or interactive)
+  <jobId>.turn-complete       # Signal file from notify hook (transient)
 ```
+
+## Security
+
+- **No shell injection**: All tmux commands use `spawnSync` with argv arrays — user input never touches shell interpretation
+- **Prompt isolation**: Prompts are written to `.prompt` files and read by launcher scripts, never embedded in commands
+- **Path boundary enforcement**: File loading validates all resolved paths stay within the working directory
+- **Restrictive permissions**: Job directory `0o700`, all files `0o600`, atomic writes prevent torn reads
+- **Crash detection**: Failed sessions are distinguished from completed ones via completion marker checks
 
 ## Tips
 

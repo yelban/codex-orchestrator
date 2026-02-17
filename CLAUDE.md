@@ -28,15 +28,17 @@ No test suite exists. No linter configured.
 bin/codex-agent (shell wrapper)
   → src/cli.ts (command parsing + routing)
     → src/jobs.ts (job lifecycle, persistence to ~/.codex-agent/jobs/)
-      → src/tmux.ts (tmux session create/send/capture/kill)
+      → src/tmux.ts (tmux session create/send/capture/kill, launcher scripts)
       → src/session-parser.ts (parse Codex JSONL sessions for tokens/files/summary)
-    → src/files.ts (glob-based file loading for context injection)
-    → src/config.ts (defaults: model, reasoning, sandbox, timeout)
+      → src/watcher.ts (turn-complete signal files, notify hook integration)
+    → src/files.ts (glob-based file loading with path boundary checks)
+    → src/fs-utils.ts (atomic writes, secure directory creation)
+    → src/config.ts (defaults: model, reasoning, sandbox, timeout, file limits)
 ```
 
-**Data flow (exec mode, default)**: `start` creates a detached tmux session → pipes prompt to `codex exec` via `tee` (for logging) → codex auto-completes → marker string triggers → job marked completed.
+**Data flow (exec mode, default)**: `start` writes prompt to `.prompt` file → generates launcher `.sh` script → creates detached tmux session running the launcher → launcher pipes prompt to `codex exec` via `tee` → codex auto-completes → marker string triggers → job marked completed.
 
-**Data flow (interactive mode, `--interactive`)**: `start` creates a detached tmux session → launches `codex` TUI via `script` (for output logging) → sends prompt via `send-keys` (or `load-buffer` for >5000 chars) → returns job ID. Idle detection monitors for completion (30s grace period). Output retrieval tries tmux pane capture first, falls back to `.log` file.
+**Data flow (interactive mode, `--interactive`)**: `start` writes prompt to `.prompt` file → generates OS-aware launcher `.sh` script → creates detached tmux session → launcher starts `codex` TUI via `script` (BSD/GNU auto-detected) → prompt sent via `send-keys` (or `load-buffer` for >5000 chars) → returns job ID. Idle detection monitors for completion (30s grace period). Output retrieval tries tmux pane capture first, falls back to `.log` file.
 
 **Job enrichment** (`jobs --json`): For completed jobs, `session-parser.ts` extracts the Codex session ID from the log file, finds the corresponding JSONL in `~/.codex/sessions/`, and parses token usage, modified files (from `apply_patch` tool calls), and last assistant message as summary.
 
@@ -47,9 +49,12 @@ bin/codex-agent (shell wrapper)
 - **Completion detection (interactive)**: Idle detection — `? for shortcuts` pattern in pane + log mtime stable for 30s → auto-sends `/exit`
 - **Idle detection safety**: 30s grace period, log mtime stability check, `exitSent` flag prevents duplicates, false positive recovery when codex resumes
 - **send command**: Only works for `--interactive` jobs; exec mode jobs reject send with error message
-- **Update prompt skip**: Interactive mode sends "3" then Enter after session creation to dismiss Codex update prompts
+- **Launcher scripts**: Each job generates a `.sh` launcher script; tmux runs `bash <launcher>` — user prompts never embedded in shell commands
+- **Argv-safe execution**: All tmux commands use `spawnSync` with argv arrays (no shell interpolation)
+- **Atomic writes**: All JSON/signal file writes use temp-file + `renameSync` pattern (via `src/fs-utils.ts`)
+- **Crash detection**: When tmux session disappears, log is checked for completion marker; no marker = `failed` status
 - **Hardcoded delays**: Interactive mode uses `sleep` (0.3–1s) between tmux commands for TUI sync — fragile but necessary
-- **Shell escaping**: Single quotes in prompts escaped as `'\''`
+- **Shell quoting in launchers**: `shellQuote()` function uses standard `'\''` technique for safe embedding in bash scripts
 - **Inactivity timeout**: Running jobs with no log file activity for 60 minutes are auto-killed (fallback for both modes)
 - **Log files**: Contain ANSI terminal codes; use `--strip-ansi` for clean output
 - **50MB buffer limit**: `captureFullHistory` maxBuffer is 50MB
@@ -76,17 +81,20 @@ plugins/codex-orchestrator/
 | defaultTimeout | 60 minutes |
 | idleDetectionEnabled | `true` |
 | idleGracePeriodSeconds | `30` |
+| maxFileCount | `200` |
+| defaultExcludes | `node_modules, .git, dist, .codex, .next, __pycache__` |
 | jobsDir | `~/.codex-agent/jobs/` |
 | tmuxPrefix | `codex-agent` |
 
 ## Storage
 
 ```
-~/.codex-agent/jobs/
-  <jobId>.json           # Job metadata (status, model, timestamps, turn tracking)
-  <jobId>.prompt         # Original prompt text
-  <jobId>.log            # Full terminal output from script command
-  <jobId>.turn-complete  # Signal file from notify hook (transient)
+~/.codex-agent/jobs/           # Created with 0o700 permissions
+  <jobId>.json                 # Job metadata (atomic writes, 0o600)
+  <jobId>.prompt               # Original prompt text
+  <jobId>.log                  # Full terminal output
+  <jobId>.sh                   # Launcher script (generated per job)
+  <jobId>.turn-complete        # Signal file from notify hook (transient)
 ```
 
 Job IDs: 8 random hex chars. Session names: `codex-agent-<jobId>`.
