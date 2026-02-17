@@ -27,6 +27,10 @@ export const config = {
   // Idle detection for interactive mode
   idleDetectionEnabled: true,
   idleGracePeriodSeconds: 30,
+
+  // File loading limits
+  maxFileCount: 200,
+  defaultExcludes: ["**/node_modules/**", "**/.git/**", "**/dist/**", "**/.codex/**", "**/.next/**", "**/__pycache__/**"],
 };
 
 export type ReasoningEffort = typeof config.reasoningEfforts[number];

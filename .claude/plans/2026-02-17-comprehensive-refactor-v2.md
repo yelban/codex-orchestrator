@@ -169,17 +169,11 @@ child.on("exit", (code) => { /* mark completed or failed based on exit code */ }
 
 ### Task 2.6: Cutover defaults and retire legacy paths safely
 - **Location**: `src/config.ts`, `src/jobs.ts`, `src/cli.ts`, `docs/usage-guide.md`, `plugins/codex-orchestrator/skills/codex-orchestrator/SKILL.md`
-- **Description**: Flip default storage to SQLite and default exec runner to spawn path; keep rollback env flags for one release window. Remove dead code while preserving interactive tmux mode. Include release checklist: bump `package.json` version, update `CHANGELOG.md`, sync SKILL.md to plugin cache, note in Release Notes that users need `/plugin install codex-orchestrator` to refresh.
+- **Description**: Flip default storage to SQLite and default exec runner to spawn path; keep rollback env flags for one release window. Remove dead code while preserving interactive tmux mode.
 - **Dependencies**: Task 2.3, Task 2.4, Task 2.5
 - **Parallelizable**: No
 - **Complexity**: 6
-- **Acceptance Criteria**: Fresh installs use SQLite + spawn exec by default; rollback flags restore prior behavior; docs and skill text match shipped behavior; release checklist documented and followed.
-
-## Release Strategy
-- **P0 complete → tag `v1.1.0`**: Security hotfix release. Strongly recommend all users update.
-- **P1 complete → tag `v1.2.0`**: Stability and UX improvements.
-- **P2 complete → tag `v2.0.0`**: Architecture modernization with SQLite and spawn exec.
-- Each release must update `package.json` version, `CHANGELOG.md`, and sync plugin cache (SKILL.md → `~/.claude/plugins/cache/`). Release Notes should flag SKILL.md changes requiring `/plugin install codex-orchestrator` to refresh.
+- **Acceptance Criteria**: Fresh installs use SQLite + spawn exec by default; rollback flags restore prior behavior; docs and skill text match shipped behavior.
 
 ## Testing Strategy
 - Use phased smoke validation because the project currently has no test suite and no linter.
@@ -188,7 +182,6 @@ child.on("exit", (code) => { /* mark completed or failed based on exit code */ }
 - Add lightweight regression scripts: parser fixtures, file-loader boundary checks, storage verification scripts.
 - Manual CLI matrix per phase: start (explicit/default), dry-run with files/map, watch output stability, interactive send/idle/await-turn behavior, delete cleanup, migration verify, exec without tmux.
 - Migration safety checks for P2: row counts, checksum parity for sampled jobs, JSON fallback read success, rollback-flag drills.
-- **Performance baselines**: After P1, `jobs --json` with 100+ completed jobs should respond in < 200ms. After P2 (SQLite), target < 50ms. Measure with `time codex-agent jobs --json > /dev/null`.
 
 ## Dependency Graph (mermaid)
 ```mermaid

@@ -1,13 +1,47 @@
 // tmux helper functions for codex-agent
+// All tmux/shell commands use argv arrays (spawnSync) to prevent injection.
 
-import { execSync, spawnSync } from "child_process";
+import { spawnSync } from "child_process";
+import { platform } from "os";
+import { join } from "path";
 import { config } from "./config.ts";
+import { atomicWriteFileSync } from "./fs-utils.ts";
 
 export interface TmuxSession {
   name: string;
   attached: boolean;
   windows: number;
   created: string;
+}
+
+// ---------- shell quoting for launcher scripts ----------
+
+/**
+ * Single-quote a string for safe embedding in bash scripts.
+ * Handles embedded single quotes via the '\'' technique.
+ */
+function shellQuote(s: string): string {
+  return "'" + s.replace(/'/g, "'\\''") + "'";
+}
+
+// ---------- low-level tmux helpers ----------
+
+/**
+ * Run a tmux command via spawnSync (argv-safe, no shell).
+ */
+function tmuxRun(
+  args: string[],
+  opts?: { maxBuffer?: number }
+): { ok: boolean; stdout: string } {
+  const result = spawnSync("tmux", args, {
+    encoding: "utf-8",
+    stdio: ["pipe", "pipe", "pipe"],
+    maxBuffer: opts?.maxBuffer,
+  });
+  return {
+    ok: result.status === 0,
+    stdout: (result.stdout || "").toString(),
+  };
 }
 
 /**
@@ -21,24 +55,15 @@ export function getSessionName(jobId: string): string {
  * Check if tmux is available
  */
 export function isTmuxAvailable(): boolean {
-  try {
-    execSync("which tmux", { stdio: "pipe" });
-    return true;
-  } catch {
-    return false;
-  }
+  const result = spawnSync("which", ["tmux"], { stdio: "pipe" });
+  return result.status === 0;
 }
 
 /**
  * Check if a tmux session exists
  */
 export function sessionExists(sessionName: string): boolean {
-  try {
-    execSync(`tmux has-session -t "${sessionName}" 2>/dev/null`, { stdio: "pipe" });
-    return true;
-  } catch {
-    return false;
-  }
+  return tmuxRun(["has-session", "-t", sessionName]).ok;
 }
 
 /**
@@ -48,13 +73,81 @@ function getExecApprovalFlag(sandbox: string): string {
   switch (sandbox) {
     case "danger-full-access":
       return "--dangerously-bypass-approvals-and-sandbox";
-    case "read-only":
-      return "--full-auto";
     default:
-      // workspace-write and others
       return "--full-auto";
   }
 }
+
+// ---------- launcher script builders ----------
+
+function buildExecLauncher(opts: {
+  promptFile: string;
+  logFile: string;
+  model: string;
+  reasoningEffort: string;
+  sandbox: string;
+}): string {
+  const q = shellQuote;
+  const approvalFlag = getExecApprovalFlag(opts.sandbox);
+  return [
+    "#!/bin/bash",
+    "set -euo pipefail",
+    "",
+    `cat ${q(opts.promptFile)} | codex exec \\`,
+    `  -m ${q(opts.model)} \\`,
+    `  -c model_reasoning_summary=concise \\`,
+    `  -c model_reasoning_effort=${q(opts.reasoningEffort)} \\`,
+    `  -s ${q(opts.sandbox)} \\`,
+    `  ${approvalFlag} \\`,
+    `  --json - 2>&1 | tee ${q(opts.logFile)}`,
+    "",
+    "printf '\\n\\n[codex-agent: Session complete. Press Enter to close.]\\n'",
+    "read",
+    "",
+  ].join("\n");
+}
+
+function buildInteractiveLauncher(opts: {
+  logFile: string;
+  model: string;
+  reasoningEffort: string;
+  sandbox: string;
+  notifyHook: string;
+  jobId: string;
+}): string {
+  const q = shellQuote;
+  const notifyValue = `notify=["bun","run","${opts.notifyHook}","${opts.jobId}"]`;
+
+  // Build the codex command parts (each properly quoted for bash)
+  const codexCmd = [
+    "codex",
+    "-c", q(`model=${opts.model}`),
+    "-c", q(`model_reasoning_effort=${opts.reasoningEffort}`),
+    "-c", q("skip_update_check=true"),
+    "-c", q(notifyValue),
+    "-a", "never",
+    "-s", q(opts.sandbox),
+  ].join(" ");
+
+  const lines = ["#!/bin/bash", "set -euo pipefail", ""];
+
+  if (platform() === "linux") {
+    // GNU script: script -q -c "command" logfile
+    lines.push(`script -q -c ${q(codexCmd)} ${q(opts.logFile)}`);
+  } else {
+    // BSD script (macOS): script -q logfile command args...
+    lines.push(`script -q ${q(opts.logFile)} ${codexCmd}`);
+  }
+
+  lines.push("");
+  lines.push("printf '\\n\\n[codex-agent: Session complete. Press Enter to close.]\\n'");
+  lines.push("read");
+  lines.push("");
+
+  return lines.join("\n");
+}
+
+// ---------- session lifecycle ----------
 
 /**
  * Create a new tmux session running codex
@@ -71,69 +164,55 @@ export function createSession(options: {
   interactive?: boolean;
 }): { sessionName: string; success: boolean; error?: string } {
   const sessionName = getSessionName(options.jobId);
-  const logFile = `${config.jobsDir}/${options.jobId}.log`;
-  const notifyHook = `${import.meta.dir}/notify-hook.ts`;
+  const logFile = join(config.jobsDir, `${options.jobId}.log`);
+  const promptFile = join(config.jobsDir, `${options.jobId}.prompt`);
+  const launcherFile = join(config.jobsDir, `${options.jobId}.sh`);
+  const notifyHook = join(import.meta.dir, "notify-hook.ts");
 
-  // Create prompt file to avoid shell escaping issues
-  const promptFile = `${config.jobsDir}/${options.jobId}.prompt`;
-  const fs = require("fs");
-  fs.writeFileSync(promptFile, options.prompt);
+  // Write prompt file
+  atomicWriteFileSync(promptFile, options.prompt);
+
+  // Build and write launcher script
+  let launcher: string;
+  if (options.interactive) {
+    launcher = buildInteractiveLauncher({
+      logFile,
+      model: options.model,
+      reasoningEffort: options.reasoningEffort,
+      sandbox: options.sandbox,
+      notifyHook,
+      jobId: options.jobId,
+    });
+  } else {
+    launcher = buildExecLauncher({
+      promptFile,
+      logFile,
+      model: options.model,
+      reasoningEffort: options.reasoningEffort,
+      sandbox: options.sandbox,
+    });
+  }
+
+  atomicWriteFileSync(launcherFile, launcher, 0o700);
 
   try {
-    let shellCmd: string;
-
-    if (options.interactive) {
-      // Interactive mode: use codex TUI (supports send, idle detection, notify hook)
-      const codexArgs = [
-        `-c`, `model="${options.model}"`,
-        `-c`, `model_reasoning_effort="${options.reasoningEffort}"`,
-        `-c`, `skip_update_check=true`,
-        `-c`, `'\\''notify=["bun","run","${notifyHook}","${options.jobId}"]'\\''`,
-        `-a`, `never`,
-        `-s`, options.sandbox,
-      ].join(" ");
-
-      shellCmd = `script -q "${logFile}" codex ${codexArgs}; echo "\\n\\n[codex-agent: Session complete. Press Enter to close.]"; read`;
-    } else {
-      // Exec mode (default): codex exec auto-completes, pipe through tee for logging
-      const approvalFlag = getExecApprovalFlag(options.sandbox);
-      shellCmd = `cat "${promptFile}" | codex exec -m "${options.model}" -c model_reasoning_summary="concise" -s "${options.sandbox}" ${approvalFlag} --json - 2>&1 | tee "${logFile}"; echo "\\n\\n[codex-agent: Session complete. Press Enter to close.]"; read`;
-    }
-
-    execSync(
-      `tmux new-session -d -s "${sessionName}" -c "${options.cwd}" '${shellCmd}'`,
-      { stdio: "pipe", cwd: options.cwd }
+    // Create tmux session pointing to launcher script (argv-safe)
+    const result = spawnSync(
+      "tmux",
+      ["new-session", "-d", "-s", sessionName, "-c", options.cwd, "bash", launcherFile],
+      { stdio: "pipe" }
     );
 
+    if (result.status !== 0) {
+      const stderr = result.stderr?.toString() || "";
+      return { sessionName, success: false, error: `tmux new-session failed: ${stderr}` };
+    }
+
     if (options.interactive) {
-      // Interactive mode: handle update prompt and send the initial prompt
+      // Wait for TUI to initialize, then send the initial prompt
+      // skip_update_check=true eliminates the need to send "3" to dismiss update prompt
       spawnSync("sleep", ["1"]);
-
-      // Skip update prompt if it appears by sending "3" (skip until next version)
-      execSync(`tmux send-keys -t "${sessionName}" "3"`, { stdio: "pipe" });
-      spawnSync("sleep", ["0.5"]);
-      execSync(`tmux send-keys -t "${sessionName}" Enter`, { stdio: "pipe" });
-      spawnSync("sleep", ["1"]);
-
-      // Send the prompt
-      const promptContent = options.prompt.replace(/'/g, "'\\''");
-
-      if (options.prompt.length < 5000) {
-        execSync(
-          `tmux send-keys -t "${sessionName}" '${promptContent}'`,
-          { stdio: "pipe" }
-        );
-        spawnSync("sleep", ["0.3"]);
-        execSync(
-          `tmux send-keys -t "${sessionName}" Enter`,
-          { stdio: "pipe" }
-        );
-      } else {
-        execSync(`tmux load-buffer "${promptFile}"`, { stdio: "pipe" });
-        execSync(`tmux paste-buffer -t "${sessionName}"`, { stdio: "pipe" });
-        spawnSync("sleep", ["0.3"]);
-        execSync(`tmux send-keys -t "${sessionName}" Enter`, { stdio: "pipe" });
-      }
+      sendPromptToSession(sessionName, options.prompt, promptFile);
     }
 
     return { sessionName, success: true };
@@ -147,15 +226,47 @@ export function createSession(options: {
 }
 
 /**
+ * Send the initial prompt to an interactive codex session.
+ * Uses tmux send-keys -l (literal) for short prompts,
+ * load-buffer + paste-buffer for long ones.
+ */
+function sendPromptToSession(
+  sessionName: string,
+  prompt: string,
+  promptFile: string
+): void {
+  if (prompt.length < 5000) {
+    // send-keys -l sends literal text (no key name interpretation)
+    spawnSync("tmux", ["send-keys", "-t", sessionName, "-l", prompt], {
+      stdio: "pipe",
+    });
+  } else {
+    // For long prompts, use load-buffer from the prompt file
+    spawnSync("tmux", ["load-buffer", promptFile], { stdio: "pipe" });
+    spawnSync("tmux", ["paste-buffer", "-t", sessionName], { stdio: "pipe" });
+  }
+  spawnSync("sleep", ["0.3"]);
+  spawnSync("tmux", ["send-keys", "-t", sessionName, "Enter"], {
+    stdio: "pipe",
+  });
+}
+
+// ---------- idle detection ----------
+
+/**
  * Check if a codex interactive session is idle (waiting for input)
  */
 export function isCodexIdle(sessionName: string): boolean {
   const output = capturePane(sessionName, { lines: 10 });
   if (!output) return false;
   // Strip ANSI codes for reliable pattern matching
-  const clean = output.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
-  return clean.includes('? for shortcuts');
+  const clean = output
+    .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "")
+    .replace(/\x1b\][^\x07]*\x07/g, "");
+  return clean.includes("? for shortcuts");
 }
+
+// ---------- message sending ----------
 
 /**
  * Send a message to a running codex session
@@ -166,13 +277,12 @@ export function sendMessage(sessionName: string, message: string): boolean {
   }
 
   try {
-    const escapedMessage = message.replace(/'/g, "'\\''");
-    execSync(`tmux send-keys -t "${sessionName}" '${escapedMessage}'`, {
+    // send-keys -l: literal mode, no key name interpretation
+    spawnSync("tmux", ["send-keys", "-t", sessionName, "-l", message], {
       stdio: "pipe",
     });
-    // Small delay before Enter for TUI to process
     spawnSync("sleep", ["0.3"]);
-    execSync(`tmux send-keys -t "${sessionName}" Enter`, {
+    spawnSync("tmux", ["send-keys", "-t", sessionName, "Enter"], {
       stdio: "pipe",
     });
     return true;
@@ -182,7 +292,7 @@ export function sendMessage(sessionName: string, message: string): boolean {
 }
 
 /**
- * Send a control key to a session (like Ctrl+C)
+ * Send a control key to a session (like C-c)
  */
 export function sendControl(sessionName: string, key: string): boolean {
   if (!sessionExists(sessionName)) {
@@ -190,12 +300,17 @@ export function sendControl(sessionName: string, key: string): boolean {
   }
 
   try {
-    execSync(`tmux send-keys -t "${sessionName}" ${key}`, { stdio: "pipe" });
+    // No -l flag: key names like C-c are interpreted
+    spawnSync("tmux", ["send-keys", "-t", sessionName, key], {
+      stdio: "pipe",
+    });
     return true;
   } catch {
     return false;
   }
 }
+
+// ---------- output capture ----------
 
 /**
  * Capture the current pane content
@@ -208,24 +323,22 @@ export function capturePane(
     return null;
   }
 
-  try {
-    let cmd = `tmux capture-pane -t "${sessionName}" -p`;
+  const args = ["capture-pane", "-t", sessionName, "-p"];
 
-    if (options.start !== undefined) {
-      cmd += ` -S ${options.start}`;
-    }
-
-    const output = execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] });
-
-    if (options.lines) {
-      const allLines = output.split("\n");
-      return allLines.slice(-options.lines).join("\n");
-    }
-
-    return output;
-  } catch {
-    return null;
+  if (options.start !== undefined) {
+    args.push("-S", String(options.start));
   }
+
+  const result = tmuxRun(args);
+  if (!result.ok) return null;
+
+  const output = result.stdout;
+  if (options.lines) {
+    const allLines = output.split("\n");
+    return allLines.slice(-options.lines).join("\n");
+  }
+
+  return output;
 }
 
 /**
@@ -236,17 +349,14 @@ export function captureFullHistory(sessionName: string): string | null {
     return null;
   }
 
-  try {
-    // Capture from start of history (-S -) to end
-    const output = execSync(
-      `tmux capture-pane -t "${sessionName}" -p -S -`,
-      { encoding: "utf-8", maxBuffer: 50 * 1024 * 1024, stdio: ["pipe", "pipe", "pipe"] }
-    );
-    return output;
-  } catch {
-    return null;
-  }
+  const result = tmuxRun(
+    ["capture-pane", "-t", sessionName, "-p", "-S", "-"],
+    { maxBuffer: 50 * 1024 * 1024 }
+  );
+  return result.ok ? result.stdout : null;
 }
+
+// ---------- session management ----------
 
 /**
  * Kill a tmux session
@@ -256,40 +366,30 @@ export function killSession(sessionName: string): boolean {
     return false;
   }
 
-  try {
-    execSync(`tmux kill-session -t "${sessionName}"`, { stdio: "pipe" });
-    return true;
-  } catch {
-    return false;
-  }
+  return tmuxRun(["kill-session", "-t", sessionName]).ok;
 }
 
 /**
  * List all codex-agent sessions
  */
 export function listSessions(): TmuxSession[] {
-  try {
-    const output = execSync(
-      `tmux list-sessions -F "#{session_name}|#{session_attached}|#{session_windows}|#{session_created}" 2>/dev/null`,
-      { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }
-    );
+  const format = "#{session_name}|#{session_attached}|#{session_windows}|#{session_created}";
+  const result = tmuxRun(["list-sessions", "-F", format]);
+  if (!result.ok || !result.stdout.trim()) return [];
 
-    return output
-      .trim()
-      .split("\n")
-      .filter((line) => line.startsWith(config.tmuxPrefix))
-      .map((line) => {
-        const [name, attached, windows, created] = line.split("|");
-        return {
-          name,
-          attached: attached === "1",
-          windows: parseInt(windows, 10),
-          created: new Date(parseInt(created, 10) * 1000).toISOString(),
-        };
-      });
-  } catch {
-    return [];
-  }
+  return result.stdout
+    .trim()
+    .split("\n")
+    .filter((line) => line.startsWith(config.tmuxPrefix))
+    .map((line) => {
+      const [name, attached, windows, created] = line.split("|");
+      return {
+        name,
+        attached: attached === "1",
+        windows: parseInt(windows, 10),
+        created: new Date(parseInt(created, 10) * 1000).toISOString(),
+      };
+    });
 }
 
 /**
@@ -307,16 +407,19 @@ export function isSessionActive(sessionName: string): boolean {
     return false;
   }
 
+  const result = tmuxRun([
+    "list-panes",
+    "-t",
+    sessionName,
+    "-F",
+    "#{pane_pid}",
+  ]);
+  if (!result.ok) return false;
+
+  const pid = result.stdout.trim();
+  if (!pid) return false;
+
   try {
-    // Check if the pane has a running process
-    const pid = execSync(
-      `tmux list-panes -t "${sessionName}" -F "#{pane_pid}"`,
-      { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }
-    ).trim();
-
-    if (!pid) return false;
-
-    // Check if that process is still running
     process.kill(parseInt(pid, 10), 0);
     return true;
   } catch {

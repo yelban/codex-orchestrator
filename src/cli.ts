@@ -300,6 +300,95 @@ async function notifyOnCompletion(
   }
 }
 
+async function handleStartCommand(
+  rawPrompt: string,
+  options: Options
+): Promise<void> {
+  if (!isTmuxAvailable()) {
+    console.error("Error: tmux is required but not installed");
+    console.error("Install with: brew install tmux");
+    process.exit(1);
+  }
+
+  let prompt = rawPrompt;
+
+  // Load file context if specified
+  if (options.files.length > 0) {
+    const files = await loadFiles(options.files, options.dir);
+    prompt = formatPromptWithFiles(prompt, files);
+    console.error(`Included ${files.length} files`);
+  }
+
+  // Include codebase map if requested
+  if (options.includeMap) {
+    const map = await loadCodebaseMap(options.dir);
+    if (map) {
+      prompt = `## Codebase Map\n\n${map}\n\n---\n\n${prompt}`;
+      console.error("Included codebase map");
+    } else {
+      console.error("No codebase map found");
+    }
+  }
+
+  if (options.dryRun) {
+    const tokens = estimateTokens(prompt);
+    console.log(`Would send ~${tokens.toLocaleString()} tokens`);
+    console.log(`Model: ${options.model}`);
+    console.log(`Reasoning: ${options.reasoning}`);
+    console.log(`Sandbox: ${options.sandbox}`);
+    console.log("\n--- Prompt Preview ---\n");
+    console.log(prompt.slice(0, 3000));
+    if (prompt.length > 3000) {
+      console.log(`\n... (${prompt.length - 3000} more characters)`);
+    }
+    process.exit(0);
+  }
+
+  const job = startJob({
+    prompt,
+    model: options.model,
+    reasoningEffort: options.reasoning,
+    sandbox: options.sandbox,
+    parentSessionId: options.parentSessionId ?? undefined,
+    cwd: options.dir,
+    interactive: options.interactive,
+  });
+
+  const mode = job.interactive ? "interactive" : "exec";
+  console.log(`Job started: ${job.id} (${mode} mode)`);
+  console.log(`Model: ${job.model} (${job.reasoningEffort})`);
+  console.log(`Working dir: ${job.cwd}`);
+  console.log(`tmux session: ${job.tmuxSession}`);
+  console.log("");
+  console.log("Commands:");
+  console.log(`  Capture output:  codex-agent capture ${job.id}`);
+  if (job.interactive) {
+    console.log(`  Send message:    codex-agent send ${job.id} "message"`);
+  }
+  console.log(`  Attach session:  tmux attach -t ${job.tmuxSession}`);
+
+  if (options.waitForCompletion) {
+    const completed = await waitForJobCompletion(job.id);
+    if (!completed) {
+      console.error("Job disappeared while waiting");
+      process.exit(1);
+    }
+
+    console.log(`\nJob ${completed.id} completed with status: ${completed.status}`);
+    if (completed.status === "failed" && completed.error) {
+      console.log(`Error: ${completed.error}`);
+    }
+
+    const finalOutput = getJobFullOutput(job.id);
+    if (finalOutput) {
+      console.log("");
+      console.log(finalOutput);
+    }
+
+    await notifyOnCompletion(completed, options.notifyOnComplete);
+  }
+}
+
 async function main() {
   const args = process.argv.slice(2);
 
@@ -341,91 +430,7 @@ async function main() {
           console.error("Error: No prompt provided");
           process.exit(1);
         }
-
-        // Check tmux first
-        if (!isTmuxAvailable()) {
-          console.error("Error: tmux is required but not installed");
-          console.error("Install with: brew install tmux");
-          process.exit(1);
-        }
-
-        let prompt = positional.join(" ");
-
-        // Load file context if specified
-        if (options.files.length > 0) {
-          const files = await loadFiles(options.files, options.dir);
-          prompt = formatPromptWithFiles(prompt, files);
-          console.error(`Included ${files.length} files`);
-        }
-
-        // Include codebase map if requested
-        if (options.includeMap) {
-          const map = await loadCodebaseMap(options.dir);
-          if (map) {
-            prompt = `## Codebase Map\n\n${map}\n\n---\n\n${prompt}`;
-            console.error("Included codebase map");
-          } else {
-            console.error("No codebase map found");
-          }
-        }
-
-        if (options.dryRun) {
-          const tokens = estimateTokens(prompt);
-          console.log(`Would send ~${tokens.toLocaleString()} tokens`);
-          console.log(`Model: ${options.model}`);
-          console.log(`Reasoning: ${options.reasoning}`);
-          console.log(`Sandbox: ${options.sandbox}`);
-          console.log("\n--- Prompt Preview ---\n");
-          console.log(prompt.slice(0, 3000));
-          if (prompt.length > 3000) {
-            console.log(`\n... (${prompt.length - 3000} more characters)`);
-          }
-          process.exit(0);
-        }
-
-        const job = startJob({
-          prompt,
-          model: options.model,
-          reasoningEffort: options.reasoning,
-          sandbox: options.sandbox,
-          parentSessionId: options.parentSessionId ?? undefined,
-          cwd: options.dir,
-          interactive: options.interactive,
-        });
-
-        const mode = job.interactive ? "interactive" : "exec";
-        console.log(`Job started: ${job.id} (${mode} mode)`);
-        console.log(`Model: ${job.model} (${job.reasoningEffort})`);
-        console.log(`Working dir: ${job.cwd}`);
-        console.log(`tmux session: ${job.tmuxSession}`);
-        console.log("");
-        console.log("Commands:");
-        console.log(`  Capture output:  codex-agent capture ${job.id}`);
-        if (job.interactive) {
-          console.log(`  Send message:    codex-agent send ${job.id} "message"`);
-        }
-        console.log(`  Attach session:  tmux attach -t ${job.tmuxSession}`);
-
-        if (options.waitForCompletion) {
-          const completed = await waitForJobCompletion(job.id);
-          if (!completed) {
-            console.error("Job disappeared while waiting");
-            process.exit(1);
-          }
-
-          console.log(`\nJob ${completed.id} completed with status: ${completed.status}`);
-          if (completed.status === "failed" && completed.error) {
-            console.log(`Error: ${completed.error}`);
-          }
-
-          const finalOutput = getJobFullOutput(job.id);
-          if (finalOutput) {
-            console.log("");
-            console.log(finalOutput);
-          }
-
-          await notifyOnCompletion(completed, options.notifyOnComplete);
-        }
+        await handleStartCommand(positional.join(" "), options);
         break;
       }
 
@@ -780,55 +785,9 @@ async function main() {
       }
 
       default:
-        // Treat as prompt for start command
+        // Treat as prompt for start command (same pipeline as explicit "start")
         if (command) {
-          // Check tmux first
-          if (!isTmuxAvailable()) {
-            console.error("Error: tmux is required but not installed");
-            console.error("Install with: brew install tmux");
-            process.exit(1);
-          }
-
-          const prompt = [command, ...positional].join(" ");
-
-          if (options.dryRun) {
-            const tokens = estimateTokens(prompt);
-            console.log(`Would send ~${tokens.toLocaleString()} tokens`);
-            process.exit(0);
-          }
-
-          const job = startJob({
-            prompt,
-            model: options.model,
-            reasoningEffort: options.reasoning,
-            sandbox: options.sandbox,
-            parentSessionId: options.parentSessionId ?? undefined,
-            cwd: options.dir,
-            interactive: options.interactive,
-          });
-
-          const mode = job.interactive ? "interactive" : "exec";
-          console.log(`Job started: ${job.id} (${mode} mode)`);
-          console.log(`tmux session: ${job.tmuxSession}`);
-          console.log(`Attach: tmux attach -t ${job.tmuxSession}`);
-
-          if (options.waitForCompletion) {
-            const completed = await waitForJobCompletion(job.id);
-            if (!completed) {
-              console.error("Job disappeared while waiting");
-              process.exit(1);
-            }
-            console.log(`\nJob ${completed.id} completed with status: ${completed.status}`);
-            if (completed.status === "failed" && completed.error) {
-              console.log(`Error: ${completed.error}`);
-            }
-            const finalOutput = getJobFullOutput(job.id);
-            if (finalOutput) {
-              console.log("");
-              console.log(finalOutput);
-            }
-            await notifyOnCompletion(completed, options.notifyOnComplete);
-          }
+          await handleStartCommand([command, ...positional].join(" "), options);
         } else {
           console.log(HELP);
         }

@@ -1,6 +1,7 @@
-import { readFileSync, writeFileSync, unlinkSync, statSync } from "fs";
+import { readFileSync, unlinkSync, statSync } from "fs";
 import { join } from "path";
 import { config } from "./config.ts";
+import { atomicWriteFileSync } from "./fs-utils.ts";
 
 export interface TurnEvent {
   turnId: string;
@@ -13,7 +14,7 @@ function getSignalPath(jobId: string): string {
 }
 
 export function writeSignalFile(jobId: string, event: TurnEvent): void {
-  writeFileSync(getSignalPath(jobId), JSON.stringify(event));
+  atomicWriteFileSync(getSignalPath(jobId), JSON.stringify(event));
 }
 
 export function readSignalFile(jobId: string): TurnEvent | null {
@@ -57,7 +58,7 @@ export function updateJobTurn(jobId: string, event: TurnEvent): void {
       ? truncateText(event.lastAgentMessage, 500)
       : null;
     job.turnState = "idle";
-    writeFileSync(jobPath, JSON.stringify(job, null, 2));
+    atomicWriteFileSync(jobPath, JSON.stringify(job, null, 2));
   } catch {
     // Job file may not exist or be corrupt - skip silently
   }
@@ -68,7 +69,7 @@ export function setJobTurnWorking(jobId: string): void {
   try {
     const job = JSON.parse(readFileSync(jobPath, "utf-8"));
     job.turnState = "working";
-    writeFileSync(jobPath, JSON.stringify(job, null, 2));
+    atomicWriteFileSync(jobPath, JSON.stringify(job, null, 2));
   } catch {
     // Skip silently
   }

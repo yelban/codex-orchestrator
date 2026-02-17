@@ -1,9 +1,10 @@
 // Job management for async codex agent execution with tmux
 
-import { mkdirSync, writeFileSync, readFileSync, readdirSync, unlinkSync, statSync } from "fs";
+import { readFileSync, readdirSync, unlinkSync, statSync } from "fs";
 import { join } from "path";
 import { config, ReasoningEffort, SandboxMode } from "./config.ts";
 import { randomBytes } from "crypto";
+import { atomicWriteFileSync, ensureDirSync } from "./fs-utils.ts";
 import { extractSessionId, findSessionFile, parseSessionFile, type ParsedSessionData } from "./session-parser.ts";
 import {
   createSession,
@@ -32,7 +33,8 @@ export interface Job {
   startedAt?: string;
   completedAt?: string;
   tmuxSession?: string;
-  result?: string;
+  result?: string; // deprecated: no longer written, kept for backward compat
+  resultPreview?: string; // last 500 chars of output
   error?: string;
   interactive?: boolean;
   idleDetectedAt?: string;
@@ -45,7 +47,7 @@ export interface Job {
 }
 
 function ensureJobsDir(): void {
-  mkdirSync(config.jobsDir, { recursive: true });
+  ensureDirSync(config.jobsDir);
 }
 
 function generateJobId(): string {
@@ -58,7 +60,7 @@ function getJobPath(jobId: string): string {
 
 export function saveJob(job: Job): void {
   ensureJobsDir();
-  writeFileSync(getJobPath(job.id), JSON.stringify(job, null, 2));
+  atomicWriteFileSync(getJobPath(job.id), JSON.stringify(job, null, 2));
 }
 
 export function loadJob(jobId: string): Job | null {
@@ -223,7 +225,7 @@ export function deleteJob(jobId: string): boolean {
   try {
     unlinkSync(getJobPath(jobId));
     // Clean up auxiliary files
-    const auxiliaryExtensions = [".prompt", ".log", ".turn-complete"];
+    const auxiliaryExtensions = [".prompt", ".log", ".turn-complete", ".sh"];
     for (const ext of auxiliaryExtensions) {
       try {
         unlinkSync(join(config.jobsDir, `${jobId}${ext}`));
@@ -411,14 +413,25 @@ export function refreshJobStatus(jobId: string): Job | null {
   if (job.status === "running" && job.tmuxSession) {
     // Check if tmux session still exists
     if (!sessionExists(job.tmuxSession)) {
-      // Session ended completely
-      job.status = "completed";
+      // Session ended — check log for completion marker to distinguish success vs crash
       job.completedAt = new Date().toISOString();
       const logFile = join(config.jobsDir, `${jobId}.log`);
+      let logContent: string | null = null;
       try {
-        job.result = readFileSync(logFile, "utf-8");
+        logContent = readFileSync(logFile, "utf-8");
       } catch {
         // No log file
+      }
+
+      if (logContent && logContent.includes("[codex-agent: Session complete")) {
+        job.status = "completed";
+      } else {
+        job.status = "failed";
+        job.error = "Session ended unexpectedly (possible crash, OOM, or killed process)";
+      }
+      // Store bounded preview instead of full output
+      if (logContent) {
+        job.resultPreview = logContent.slice(-500);
       }
       saveJob(job);
     } else {
@@ -428,11 +441,8 @@ export function refreshJobStatus(jobId: string): Job | null {
       if (output && output.includes("[codex-agent: Session complete")) {
         job.status = "completed";
         job.completedAt = new Date().toISOString();
-        // Capture full output
-        const fullOutput = captureFullHistory(job.tmuxSession);
-        if (fullOutput) {
-          job.result = fullOutput;
-        }
+        // Store bounded preview (full output available via log file or tmux capture)
+        job.resultPreview = output.slice(-500);
         saveJob(job);
       } else if (job.interactive && config.idleDetectionEnabled && !job.exitSent) {
         // Idle detection for interactive jobs only
