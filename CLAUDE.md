@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-CLI tool for delegating tasks to GPT Codex agents via tmux sessions. Designed for Claude Code orchestration with bidirectional communication.
+CLI tool for delegating tasks to GPT Codex agents. Exec mode uses detached `child_process.spawn` (no tmux); interactive mode uses tmux TUI. Designed for Claude Code orchestration with bidirectional communication.
 
-**Stack**: TypeScript, Bun, tmux, OpenAI Codex CLI
+**Stack**: TypeScript, Bun, SQLite (bun:sqlite), tmux (interactive only), OpenAI Codex CLI
 
 ## Development
 
@@ -27,26 +27,35 @@ No test suite exists. No linter configured.
 ```
 bin/codex-agent (shell wrapper)
   → src/cli.ts (command parsing + routing)
-    → src/jobs.ts (job lifecycle, persistence to ~/.codex-agent/jobs/)
-      → src/tmux.ts (tmux session create/send/capture/kill, launcher scripts)
+    → src/jobs.ts (job lifecycle, store abstraction)
+      → src/store/ (JobStore interface + JsonStore, SqliteStore, DualStore)
+      → src/tmux.ts (tmux session create/send/capture/kill — interactive only)
+      → src/spawn-runner.ts (detached child_process — exec mode default)
       → src/session-parser.ts (parse Codex JSONL sessions for tokens/files/summary)
       → src/watcher.ts (turn-complete signal files, notify hook integration)
     → src/files.ts (glob-based file loading with path boundary checks)
+    → src/prompt-constraints.ts (auto-inject XML constraint blocks)
     → src/fs-utils.ts (atomic writes, secure directory creation)
-    → src/config.ts (defaults: model, reasoning, sandbox, timeout, file limits)
+    → src/config.ts (defaults: model, reasoning, sandbox, timeout, storage, runner)
 ```
 
-**Data flow (exec mode, default)**: `start` writes prompt to `.prompt` file → generates launcher `.sh` script → creates detached tmux session running the launcher → launcher pipes prompt to `codex exec` via `tee` → codex auto-completes → marker string triggers → job marked completed.
+**Data flow (exec mode, default — spawn runner)**: `start` writes prompt to `.prompt` file → generates launcher `.sh` script → spawns detached `bash <launcher>` via `child_process.spawn` → launcher pipes prompt to `codex exec` via `tee` → codex auto-completes → exit code written to `.exitcode` file → `refreshJobStatus` checks PID liveness + exit code for accurate completion/failure detection.
 
-**Data flow (interactive mode, `--interactive`)**: `start` writes prompt to `.prompt` file → generates OS-aware launcher `.sh` script → creates detached tmux session → launcher starts `codex` TUI via `script` (BSD/GNU auto-detected) → prompt sent via `send-keys` (or `load-buffer` for >5000 chars) → returns job ID. Idle detection monitors for completion (30s grace period). Output retrieval tries tmux pane capture first, falls back to `.log` file.
+**Data flow (exec mode — tmux runner fallback)**: Same as above but runs inside a detached tmux session. Set `CODEX_AGENT_EXEC_RUNNER=tmux` to use. Marker string `[codex-agent: Session complete` used for completion detection.
 
-**Job enrichment** (`jobs --json`): For completed jobs, enrichment data (tokens, files, summary) is cached in the job JSON after first parse. On first access, `session-parser.ts` extracts the Codex session ID from the log file, finds the corresponding JSONL in `~/.codex/sessions/`, and parses the data. Subsequent calls read from cache, skipping the recursive directory scan.
+**Data flow (interactive mode, `--interactive`)**: Always uses tmux. `start` writes prompt to `.prompt` file → generates OS-aware launcher `.sh` script → creates detached tmux session → launcher starts `codex` TUI via `script` (BSD/GNU auto-detected) → prompt sent via `send-keys` (or `load-buffer` for >5000 chars) → returns job ID. Idle detection monitors for completion (30s grace period).
+
+**Storage**: Job metadata stored via `JobStore` abstraction. Default `dual` mode writes to both JSON files + SQLite (WAL mode), reads from SQLite with JSON fallback. Auto-backfills JSON→SQLite on first init. Override with `CODEX_AGENT_STORAGE=json|sqlite`.
+
+**Job enrichment** (`jobs --json`): For completed jobs, enrichment data (tokens, files, summary) is cached in the job record after first parse. Subsequent calls read from cache, skipping the recursive `~/.codex/sessions/` scan.
 
 ## Key Behaviors & Gotchas
 
-- **Dual modes**: Default `exec` mode uses `codex exec` (auto-completes, no send). `--interactive` uses TUI (supports send, idle detection)
-- **Completion detection (exec)**: `codex exec` exits naturally → marker string `[codex-agent: Session complete` appears → job completed
+- **Dual modes + dual runners**: Exec mode defaults to spawn runner (no tmux); interactive mode always uses tmux TUI. Set `CODEX_AGENT_EXEC_RUNNER=tmux` for legacy exec behavior.
+- **Completion detection (exec/spawn)**: Process exit → exit code file checked; exit 0 = completed, non-zero = failed with error message
+- **Completion detection (exec/tmux)**: Marker string `[codex-agent: Session complete` in log/pane output
 - **Completion detection (interactive)**: Idle detection — `? for shortcuts` pattern matched at line start in last 5 pane lines + log mtime stable for 30s → auto-sends `/exit`
+- **Auto-constraint injection**: `<design_and_scope_constraints>` and `<context_loading>` XML blocks auto-appended to all prompts (with dedup detection); opt-out with `--no-constraints`
 - **Idle detection safety**: 30s grace period, log mtime stability check, `exitSent` flag prevents duplicates, false positive recovery when codex resumes; `--keep-alive` disables auto-exit entirely
 - **send command**: Only works for `--interactive` jobs; exec mode jobs reject send with error; also blocked when `/exit` already sent
 - **Launcher scripts**: Each job generates a `.sh` launcher script; tmux runs `bash <launcher>` — user prompts never embedded in shell commands
@@ -79,9 +88,12 @@ plugins/codex-orchestrator/
 | defaultReasoningEffort | `xhigh` |
 | defaultSandbox | `workspace-write` |
 | defaultTimeout | 60 minutes |
+| interactiveTimeout | 120 minutes |
 | idleDetectionEnabled | `true` |
 | idleGracePeriodSeconds | `30` |
-| interactiveTimeout | 120 minutes |
+| storageMode | `dual` (env: `CODEX_AGENT_STORAGE`) |
+| execRunner | `spawn` (env: `CODEX_AGENT_EXEC_RUNNER`) |
+| sqliteDbPath | `~/.codex-agent/codex-agent.db` |
 | maxFileCount | `200` |
 | defaultExcludes | `node_modules, .git, dist, .codex, .next, __pycache__` |
 | jobsDir | `~/.codex-agent/jobs/` |
@@ -90,15 +102,20 @@ plugins/codex-orchestrator/
 ## Storage
 
 ```
-~/.codex-agent/jobs/           # Created with 0o700 permissions
-  <jobId>.json                 # Job metadata (atomic writes, 0o600)
-  <jobId>.prompt               # Original prompt text
-  <jobId>.log                  # Full terminal output
-  <jobId>.sh                   # Launcher script (generated per job)
-  <jobId>.turn-complete        # Signal file from notify hook (transient)
+~/.codex-agent/
+  codex-agent.db               # SQLite database (WAL mode)
+  jobs/                        # Created with 0o700 permissions
+    <jobId>.json               # Job metadata JSON (dual-write, 0o600)
+    <jobId>.prompt             # Original prompt text
+    <jobId>.log                # Full terminal output
+    <jobId>.sh                 # Launcher script (generated per job)
+    <jobId>.exitcode           # Exit code from spawn runner
+    <jobId>.turn-complete      # Signal file from notify hook (transient)
 ```
 
 Job IDs: 8 random hex chars. Session names: `codex-agent-<jobId>`.
+
+CLI management: `codex-agent migrate` (JSON→SQLite bulk import), `codex-agent verify-storage` (sync check).
 
 ## Claude Orchestration Pattern (Persisted)
 

@@ -26,6 +26,7 @@ import {
   getJobsJson,
 } from "./jobs.ts";
 import { loadFiles, formatPromptWithFiles, estimateTokens, loadCodebaseMap } from "./files.ts";
+import { injectConstraints } from "./prompt-constraints.ts";
 import { isTmuxAvailable, listSessions } from "./tmux.ts";
 import { cleanTerminalOutput } from "./output-cleaner.ts";
 
@@ -45,11 +46,13 @@ Usage:
   codex-agent sessions                   List active tmux sessions
   codex-agent kill <jobId>               Kill running job
   codex-agent clean                      Clean old completed jobs
+  codex-agent migrate                    Import JSON jobs into SQLite
+  codex-agent verify-storage             Check JSON/SQLite sync status
   codex-agent health                     Check tmux and codex availability
 
 Options:
   -r, --reasoning <level>    Reasoning effort: low, medium, high, xhigh (default: xhigh)
-  -m, --model <model>        Model name (default: gpt-5.3-codex-spark)
+  -m, --model <model>        Model name (default: gpt-5.3-codex)
   -s, --sandbox <mode>       Sandbox: read-only, workspace-write, danger-full-access
   -w, --wait                 Wait for completion before exiting
   --notify-on-complete <cmd>  Run command when job completes
@@ -59,6 +62,7 @@ Options:
   --keep-alive               Disable auto-exit for interactive jobs (for multi-turn use)
   --parent-session <id>      Parent session ID for linkage
   --map                      Include codebase map if available
+  --no-constraints           Skip auto-injection of prompt constraint blocks
   --dry-run                  Show prompt without executing
   --strip-ansi               Remove ANSI and Codex TUI noise from output (for capture/output)
   --clean                    Alias for --strip-ansi
@@ -68,8 +72,12 @@ Options:
   -h, --help                 Show this help
 
 Modes:
-  Default (exec):     codex exec — auto-completes, no send support
-  Interactive (TUI):  --interactive — supports send, idle detection auto-exit
+  Default (exec):     codex exec — auto-completes, no send support (spawn runner)
+  Interactive (TUI):  --interactive — supports send, idle detection auto-exit (tmux)
+
+Environment:
+  CODEX_AGENT_STORAGE=json|sqlite|dual   Storage backend (default: dual)
+  CODEX_AGENT_EXEC_RUNNER=tmux|spawn     Exec runner (default: spawn)
 
 Examples:
   # Start an agent (exec mode, auto-completes)
@@ -103,6 +111,7 @@ interface Options {
   keepAlive: boolean;
   includeMap: boolean;
   parentSessionId: string | null;
+  noConstraints: boolean;
   dryRun: boolean;
   stripAnsi: boolean;
   json: boolean;
@@ -127,6 +136,7 @@ function parseArgs(args: string[]): {
     keepAlive: false,
     includeMap: false,
     parentSessionId: null,
+    noConstraints: false,
     dryRun: false,
     stripAnsi: false,
     json: false,
@@ -181,6 +191,8 @@ function parseArgs(args: string[]): {
       options.parentSessionId = args[++i] ?? null;
     } else if (arg === "--map") {
       options.includeMap = true;
+    } else if (arg === "--no-constraints") {
+      options.noConstraints = true;
     } else if (arg === "--dry-run") {
       options.dryRun = true;
     } else if (arg === "--strip-ansi" || arg === "--clean") {
@@ -336,6 +348,11 @@ async function handleStartCommand(
     } else {
       console.error("No codebase map found");
     }
+  }
+
+  // Auto-inject constraint blocks unless opted out
+  if (!options.noConstraints) {
+    prompt = injectConstraints(prompt);
   }
 
   if (options.dryRun) {
@@ -808,6 +825,61 @@ async function main() {
           console.error(`Could not delete job: ${positional[0]}`);
           process.exit(1);
         }
+        break;
+      }
+
+      case "migrate": {
+        const { JsonStore } = require("./store/json-store.ts");
+        const { SqliteStore } = require("./store/sqlite-store.ts");
+        const jsonStore = new JsonStore(config.jobsDir);
+        const sqliteStore = new SqliteStore(config.sqliteDbPath);
+
+        const jsonJobs = jsonStore.list();
+        if (jsonJobs.length === 0) {
+          console.log("No JSON jobs to migrate.");
+          sqliteStore.close();
+          break;
+        }
+
+        const imported = sqliteStore.importJobs(jsonJobs);
+        const total = sqliteStore.count();
+        console.log(`Migrated ${imported} new jobs (${jsonJobs.length} total in JSON, ${total} total in SQLite)`);
+        sqliteStore.close();
+        break;
+      }
+
+      case "verify-storage": {
+        const { JsonStore } = require("./store/json-store.ts");
+        const { SqliteStore } = require("./store/sqlite-store.ts");
+        const jsonStore = new JsonStore(config.jobsDir);
+        const sqliteStore = new SqliteStore(config.sqliteDbPath);
+
+        const jsonJobs = jsonStore.list();
+        const sqliteCount = sqliteStore.count();
+        const jsonCount = jsonJobs.length;
+
+        console.log(`Storage mode: ${config.storageMode}`);
+        console.log(`JSON jobs:    ${jsonCount}`);
+        console.log(`SQLite jobs:  ${sqliteCount}`);
+
+        // Check for JSON-only jobs (not in SQLite)
+        let missing = 0;
+        for (const job of jsonJobs) {
+          if (!sqliteStore.load(job.id)) missing++;
+        }
+
+        if (missing > 0) {
+          console.log(`\nWarning: ${missing} job(s) exist in JSON but not in SQLite.`);
+          console.log(`Run 'codex-agent migrate' to sync them.`);
+        } else if (jsonCount > 0 && sqliteCount >= jsonCount) {
+          console.log(`\nStatus: OK — all JSON jobs present in SQLite.`);
+        } else if (jsonCount === 0 && sqliteCount === 0) {
+          console.log(`\nStatus: Empty — no jobs in either store.`);
+        } else {
+          console.log(`\nStatus: OK`);
+        }
+
+        sqliteStore.close();
         break;
       }
 

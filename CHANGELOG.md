@@ -1,8 +1,36 @@
 # Changelog
 
-## [Unreleased] — P2 architecture modernization
+## [2.0.0] — 2026-02-17 — P2 Architecture Modernization
 
-*Not started*
+### Added
+
+- **SQLite storage backend** (`bun:sqlite`): WAL mode, `busy_timeout=5000`, schema versioning with migrations; replaces fragile JSON file reads/writes for job metadata
+- **JobStore abstraction** (`src/store/`): Interface + 3 implementations — `JsonStore` (legacy), `SqliteStore` (new), `DualStore` (transitional dual-write)
+- **Spawn-based exec runner** (`src/spawn-runner.ts`): Detached `child_process.spawn` for exec mode — no tmux dependency; tracks PID and exit code for accurate completion/failure detection
+- **`migrate` CLI command**: Bulk import existing JSON jobs into SQLite (`INSERT OR IGNORE`, idempotent)
+- **`verify-storage` CLI command**: Reports JSON/SQLite job counts and sync status with actionable remediation
+- **Auto-constraint injection** (`src/prompt-constraints.ts`): Mandatory XML blocks (`<design_and_scope_constraints>`, `<context_loading>`) auto-appended to all prompts with dedup detection
+- **`--no-constraints` flag**: Opt-out for auto-constraint injection
+- **Job fields**: `pid`, `exitCode`, `runner` (spawn-mode tracking)
+
+### Changed
+
+- **Default storage**: `json` → `dual` (writes both JSON+SQLite, reads SQLite with JSON fallback; auto-backfills on init)
+- **Default exec runner**: `tmux` → `spawn` (exec mode no longer requires tmux; interactive still uses tmux)
+- **DualStore backfill**: On first init, automatically imports all existing JSON jobs into SQLite
+- **SQLite schema v2**: Added `pid`, `exit_code`, `runner` columns (auto-migrated from v1)
+- **`refreshJobStatus()`**: Split into `refreshSpawnJob()` (exit code based) and `refreshTmuxJob()` (session/marker based) for accurate per-runner status detection
+- **`killJob()`**: Routes to `SIGTERM` for spawn-mode jobs, `tmux kill-session` for tmux jobs
+- **`deleteJob()`**: Also cleans up `.exitcode` files (spawn mode)
+- **SQL operations**: Refactored verbose INSERT statements into `SqliteStore.toParams()` + `SqliteStore.insertSql()` helpers
+
+### Config
+
+| Key | Default | Env Override |
+|-----|---------|-------------|
+| `storageMode` | `dual` | `CODEX_AGENT_STORAGE=json\|sqlite\|dual` |
+| `execRunner` | `spawn` | `CODEX_AGENT_EXEC_RUNNER=tmux\|spawn` |
+| `sqliteDbPath` | `~/.codex-agent/codex-agent.db` | — |
 
 ## [1.2.0] — 2026-02-17 — P1 Bug Fixes + UX
 

@@ -1,11 +1,11 @@
-// Job management for async codex agent execution with tmux
+// Job management for async codex agent execution with tmux/spawn
 
-import { readFileSync, readdirSync, unlinkSync, statSync } from "fs";
+import { readFileSync, unlinkSync, statSync } from "fs";
 import { join } from "path";
 import { config, ReasoningEffort, SandboxMode } from "./config.ts";
 import { randomBytes } from "crypto";
-import { atomicWriteFileSync, ensureDirSync } from "./fs-utils.ts";
 import { extractSessionId, findSessionFile, parseSessionFile, type ParsedSessionData } from "./session-parser.ts";
+import { getStore } from "./store/index.ts";
 import {
   createSession,
   killSession,
@@ -18,6 +18,7 @@ import {
   sendControl,
   isCodexIdle,
 } from "./tmux.ts";
+import { spawnExecJob, isProcessAlive, readExitCode } from "./spawn-runner.ts";
 import { clearSignalFile, signalFileExists, readSignalFile, type TurnEvent } from "./watcher.ts";
 
 export interface Job {
@@ -33,6 +34,9 @@ export interface Job {
   startedAt?: string;
   completedAt?: string;
   tmuxSession?: string;
+  pid?: number; // spawn-mode: process ID
+  exitCode?: number; // spawn-mode: exit code after completion
+  runner?: "tmux" | "spawn"; // which runner launched this job
   result?: string; // deprecated: no longer written, kept for backward compat
   resultPreview?: string; // last 500 chars of output
   error?: string;
@@ -54,46 +58,20 @@ export interface Job {
   };
 }
 
-function ensureJobsDir(): void {
-  ensureDirSync(config.jobsDir);
-}
-
 function generateJobId(): string {
   return randomBytes(4).toString("hex");
 }
 
-function getJobPath(jobId: string): string {
-  return join(config.jobsDir, `${jobId}.json`);
-}
-
 export function saveJob(job: Job): void {
-  ensureJobsDir();
-  atomicWriteFileSync(getJobPath(job.id), JSON.stringify(job, null, 2));
+  getStore().save(job);
 }
 
 export function loadJob(jobId: string): Job | null {
-  try {
-    const content = readFileSync(getJobPath(jobId), "utf-8");
-    return JSON.parse(content);
-  } catch {
-    return null;
-  }
+  return getStore().load(jobId);
 }
 
 export function listJobs(): Job[] {
-  ensureJobsDir();
-  const files = readdirSync(config.jobsDir).filter((f) => f.endsWith(".json"));
-  return files
-    .map((f) => {
-      try {
-        const content = readFileSync(join(config.jobsDir, f), "utf-8");
-        return JSON.parse(content) as Job;
-      } catch {
-        return null;
-      }
-    })
-    .filter((j): j is Job => j !== null)
-    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  return getStore().list();
 }
 
 function truncateText(value: string, maxLength: number): string {
@@ -245,21 +223,20 @@ export function deleteJob(jobId: string): boolean {
     killSession(job.tmuxSession);
   }
 
-  try {
-    unlinkSync(getJobPath(jobId));
-    // Clean up auxiliary files
-    const auxiliaryExtensions = [".prompt", ".log", ".turn-complete", ".sh"];
-    for (const ext of auxiliaryExtensions) {
-      try {
-        unlinkSync(join(config.jobsDir, `${jobId}${ext}`));
-      } catch {
-        // File may not exist
-      }
+  // Remove job from store
+  const removed = getStore().remove(jobId);
+
+  // Clean up auxiliary files (.prompt, .log, .turn-complete, .sh, .exitcode)
+  const auxiliaryExtensions = [".prompt", ".log", ".turn-complete", ".sh", ".exitcode"];
+  for (const ext of auxiliaryExtensions) {
+    try {
+      unlinkSync(join(config.jobsDir, `${jobId}${ext}`));
+    } catch {
+      // File may not exist
     }
-    return true;
-  } catch {
-    return false;
   }
+
+  return removed;
 }
 
 export interface StartJobOptions {
@@ -274,10 +251,11 @@ export interface StartJobOptions {
 }
 
 export function startJob(options: StartJobOptions): Job {
-  ensureJobsDir();
-
   const jobId = generateJobId();
   const cwd = options.cwd || process.cwd();
+
+  // Determine runner: spawn for exec mode (when configured), tmux for interactive or default
+  const useSpawn = config.execRunner === "spawn" && !options.interactive;
 
   const job: Job = {
     id: jobId,
@@ -291,30 +269,54 @@ export function startJob(options: StartJobOptions): Job {
     createdAt: new Date().toISOString(),
     interactive: options.interactive || false,
     keepAlive: options.keepAlive || false,
+    runner: useSpawn ? "spawn" : "tmux",
   };
 
   saveJob(job);
 
-  // Create tmux session with codex
-  const result = createSession({
-    jobId,
-    prompt: options.prompt,
-    model: job.model,
-    reasoningEffort: job.reasoningEffort,
-    sandbox: job.sandbox,
-    cwd,
-    interactive: options.interactive,
-  });
+  if (useSpawn) {
+    // Spawn-based exec: detached child process, no tmux
+    const result = spawnExecJob({
+      jobId,
+      prompt: options.prompt,
+      model: job.model,
+      reasoningEffort: job.reasoningEffort,
+      sandbox: job.sandbox,
+      cwd,
+    });
 
-  if (result.success) {
-    job.status = "running";
-    job.startedAt = new Date().toISOString();
-    job.tmuxSession = result.sessionName;
-    job.turnState = "working";
+    if (result.success) {
+      job.status = "running";
+      job.startedAt = new Date().toISOString();
+      job.pid = result.pid;
+      job.turnState = "working";
+    } else {
+      job.status = "failed";
+      job.error = result.error || "Failed to spawn exec process";
+      job.completedAt = new Date().toISOString();
+    }
   } else {
-    job.status = "failed";
-    job.error = result.error || "Failed to create tmux session";
-    job.completedAt = new Date().toISOString();
+    // Tmux-based: create tmux session (both exec and interactive modes)
+    const result = createSession({
+      jobId,
+      prompt: options.prompt,
+      model: job.model,
+      reasoningEffort: job.reasoningEffort,
+      sandbox: job.sandbox,
+      cwd,
+      interactive: options.interactive,
+    });
+
+    if (result.success) {
+      job.status = "running";
+      job.startedAt = new Date().toISOString();
+      job.tmuxSession = result.sessionName;
+      job.turnState = "working";
+    } else {
+      job.status = "failed";
+      job.error = result.error || "Failed to create tmux session";
+      job.completedAt = new Date().toISOString();
+    }
   }
 
   saveJob(job);
@@ -325,8 +327,14 @@ export function killJob(jobId: string): boolean {
   const job = loadJob(jobId);
   if (!job) return false;
 
-  // Kill tmux session
-  if (job.tmuxSession) {
+  // Kill by runner type
+  if (job.runner === "spawn" && job.pid) {
+    try {
+      process.kill(job.pid, "SIGTERM");
+    } catch {
+      // Process may have already exited
+    }
+  } else if (job.tmuxSession) {
     killSession(job.tmuxSession);
   }
 
@@ -430,89 +438,142 @@ export function cleanupOldJobs(maxAgeDays: number = 7): number {
 
 export function isJobRunning(jobId: string): boolean {
   const job = loadJob(jobId);
-  if (!job || !job.tmuxSession) return false;
+  if (!job) return false;
 
-  return isSessionActive(job.tmuxSession);
+  if (job.runner === "spawn" && job.pid) {
+    return isProcessAlive(job.pid);
+  }
+  if (job.tmuxSession) {
+    return isSessionActive(job.tmuxSession);
+  }
+  return false;
 }
 
 export function refreshJobStatus(jobId: string): Job | null {
   const job = loadJob(jobId);
   if (!job) return null;
 
-  if (job.status === "running" && job.tmuxSession) {
-    // Check if tmux session still exists
-    if (!sessionExists(job.tmuxSession)) {
-      // Session ended — check log for completion marker to distinguish success vs crash
-      job.completedAt = new Date().toISOString();
-      const logFile = join(config.jobsDir, `${jobId}.log`);
-      let logContent: string | null = null;
-      try {
-        logContent = readFileSync(logFile, "utf-8");
-      } catch {
-        // No log file
-      }
+  if (job.status !== "running") return job;
 
-      if (logContent && logContent.includes("[codex-agent: Session complete")) {
-        job.status = "completed";
-      } else {
-        job.status = "failed";
-        job.error = "Session ended unexpectedly (possible crash, OOM, or killed process)";
-      }
-      // Store bounded preview instead of full output
-      if (logContent) {
-        job.resultPreview = logContent.slice(-500);
-      }
-      saveJob(job);
-    } else {
-      // Session exists - check if codex is still running
-      // Look for the "[codex-agent: Session complete" marker in output
-      const output = capturePane(job.tmuxSession, { lines: 20 });
-      if (output && output.includes("[codex-agent: Session complete")) {
-        job.status = "completed";
-        job.completedAt = new Date().toISOString();
-        // Store bounded preview (full output available via log file or tmux capture)
-        job.resultPreview = output.slice(-500);
-        saveJob(job);
-      } else if (job.interactive && config.idleDetectionEnabled && !job.exitSent && !job.keepAlive) {
-        // Idle detection for interactive jobs only
-        const idle = isCodexIdle(job.tmuxSession);
-
-        if (idle) {
-          if (!job.idleDetectedAt) {
-            // First detection — record timestamp
-            job.idleDetectedAt = new Date().toISOString();
-            saveJob(job);
-          } else {
-            // Check if grace period has passed AND log mtime is stable
-            const idleSinceMs = Date.now() - Date.parse(job.idleDetectedAt);
-            const logMtime = getLogMtimeMs(job.id);
-            const logStable = logMtime !== null
-              ? (Date.now() - logMtime) > config.idleGracePeriodSeconds * 1000
-              : true;
-
-            if (idleSinceMs >= config.idleGracePeriodSeconds * 1000 && logStable) {
-              // Send /exit to gracefully close codex
-              sendMessage(job.tmuxSession, "/exit");
-              job.exitSent = true;
-              saveJob(job);
-            }
-          }
-        } else if (job.idleDetectedAt) {
-          // False positive recovery — codex resumed work
-          job.idleDetectedAt = undefined;
-          saveJob(job);
-        }
-      } else if (isInactiveTimedOut(job)) {
-        killSession(job.tmuxSession);
-        job.status = "failed";
-        job.error = `Timed out after ${config.defaultTimeout} minutes of inactivity`;
-        job.completedAt = new Date().toISOString();
-        saveJob(job);
-      }
-    }
+  // Route by runner type
+  if (job.runner === "spawn" && job.pid) {
+    refreshSpawnJob(job);
+  } else if (job.tmuxSession) {
+    refreshTmuxJob(job);
   }
 
   return loadJob(jobId);
+}
+
+/** Refresh status for spawn-mode jobs (exec via child_process). */
+function refreshSpawnJob(job: Job): void {
+  if (!job.pid) return;
+
+  if (isProcessAlive(job.pid)) {
+    // Still running — check inactivity timeout
+    if (isInactiveTimedOut(job)) {
+      try { process.kill(job.pid, "SIGTERM"); } catch { /* already gone */ }
+      job.status = "failed";
+      job.error = `Timed out after ${config.defaultTimeout} minutes of inactivity`;
+      job.completedAt = new Date().toISOString();
+      saveJob(job);
+    }
+    return;
+  }
+
+  // Process exited — determine success/failure via exit code
+  job.completedAt = new Date().toISOString();
+  const exitCode = readExitCode(job.id);
+  job.exitCode = exitCode ?? undefined;
+
+  const logFile = join(config.jobsDir, `${job.id}.log`);
+  let logContent: string | null = null;
+  try {
+    logContent = readFileSync(logFile, "utf-8");
+  } catch { /* no log */ }
+
+  if (exitCode === 0) {
+    job.status = "completed";
+  } else if (logContent && logContent.includes("[codex-agent: Session complete")) {
+    job.status = "completed";
+  } else {
+    job.status = "failed";
+    job.error = exitCode !== null
+      ? `Process exited with code ${exitCode}`
+      : "Process exited unexpectedly (no exit code file)";
+  }
+
+  if (logContent) {
+    job.resultPreview = logContent.slice(-500);
+  }
+  saveJob(job);
+}
+
+/** Refresh status for tmux-based jobs (both exec and interactive). */
+function refreshTmuxJob(job: Job): void {
+  if (!job.tmuxSession) return;
+
+  if (!sessionExists(job.tmuxSession)) {
+    // Session ended — check log for completion marker to distinguish success vs crash
+    job.completedAt = new Date().toISOString();
+    const logFile = join(config.jobsDir, `${job.id}.log`);
+    let logContent: string | null = null;
+    try {
+      logContent = readFileSync(logFile, "utf-8");
+    } catch { /* no log */ }
+
+    if (logContent && logContent.includes("[codex-agent: Session complete")) {
+      job.status = "completed";
+    } else {
+      job.status = "failed";
+      job.error = "Session ended unexpectedly (possible crash, OOM, or killed process)";
+    }
+    if (logContent) {
+      job.resultPreview = logContent.slice(-500);
+    }
+    saveJob(job);
+    return;
+  }
+
+  // Session exists — check for completion marker
+  const output = capturePane(job.tmuxSession, { lines: 20 });
+  if (output && output.includes("[codex-agent: Session complete")) {
+    job.status = "completed";
+    job.completedAt = new Date().toISOString();
+    job.resultPreview = output.slice(-500);
+    saveJob(job);
+  } else if (job.interactive && config.idleDetectionEnabled && !job.exitSent && !job.keepAlive) {
+    // Idle detection for interactive jobs only
+    const idle = isCodexIdle(job.tmuxSession);
+
+    if (idle) {
+      if (!job.idleDetectedAt) {
+        job.idleDetectedAt = new Date().toISOString();
+        saveJob(job);
+      } else {
+        const idleSinceMs = Date.now() - Date.parse(job.idleDetectedAt);
+        const logMtime = getLogMtimeMs(job.id);
+        const logStable = logMtime !== null
+          ? (Date.now() - logMtime) > config.idleGracePeriodSeconds * 1000
+          : true;
+
+        if (idleSinceMs >= config.idleGracePeriodSeconds * 1000 && logStable) {
+          sendMessage(job.tmuxSession, "/exit");
+          job.exitSent = true;
+          saveJob(job);
+        }
+      }
+    } else if (job.idleDetectedAt) {
+      job.idleDetectedAt = undefined;
+      saveJob(job);
+    }
+  } else if (isInactiveTimedOut(job)) {
+    killSession(job.tmuxSession);
+    job.status = "failed";
+    job.error = `Timed out after ${config.defaultTimeout} minutes of inactivity`;
+    job.completedAt = new Date().toISOString();
+    saveJob(job);
+  }
 }
 
 export function isJobIdle(jobId: string): boolean {

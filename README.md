@@ -4,9 +4,9 @@
   <img src="codex-agent-hero.jpeg" alt="Claude orchestrating Codex agents" width="600">
 </p>
 
-Delegate tasks to OpenAI Codex agents via tmux sessions. Designed for Claude Code orchestration.
+Delegate tasks to OpenAI Codex agents. Exec mode uses detached processes (no tmux required); interactive mode uses tmux TUI. Designed for Claude Code orchestration.
 
-Spawn parallel coding agents, monitor their progress, and capture results — all from Claude Code or the command line. Supports two execution modes: **exec** (default, auto-completes) and **interactive** (TUI with send support and idle detection).
+Spawn parallel coding agents, monitor their progress, and capture results — all from Claude Code or the command line. Supports two execution modes: **exec** (default, spawn runner, auto-completes) and **interactive** (tmux TUI with send support and idle detection). Job metadata stored in SQLite (WAL mode) with JSON fallback.
 
 ## Installation
 
@@ -67,7 +67,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/yelban/codex-orchestrator/ma
 
 | Dependency | Purpose | Install |
 |-----------|---------|---------|
-| [tmux](https://github.com/tmux/tmux) | Terminal multiplexer - agents run in tmux sessions | `brew install tmux` |
+| [tmux](https://github.com/tmux/tmux) | Terminal multiplexer - interactive mode only (exec mode doesn't need it) | `brew install tmux` |
 | [Bun](https://bun.sh) | JavaScript runtime - runs the CLI | `curl -fsSL https://bun.sh/install \| bash` |
 | [Codex CLI](https://github.com/openai/codex) | OpenAI's coding agent - the thing being orchestrated | `npm install -g @openai/codex` |
 | OpenAI account | API access for Codex agents | `codex --login` |
@@ -137,6 +137,8 @@ codex-agent send <jobId> "Focus on the authentication module instead"
 | `sessions` | List active tmux sessions |
 | `kill <id>` | Terminate a running job (last resort) |
 | `clean` | Remove jobs older than 7 days |
+| `migrate` | Import JSON jobs into SQLite |
+| `verify-storage` | Check JSON/SQLite sync status |
 | `health` | Check tmux and codex availability |
 
 ## Options
@@ -144,7 +146,7 @@ codex-agent send <jobId> "Focus on the authentication module instead"
 | Option | Description |
 |--------|-------------|
 | `-r, --reasoning <level>` | Reasoning effort: `low`, `medium`, `high`, `xhigh` |
-| `-m, --model <model>` | Model name (default: gpt-5.3-codex-spark) |
+| `-m, --model <model>` | Model name (default: gpt-5.3-codex) |
 | `-w, --wait` | Wait for completion and emit a ping when done |
 | `--notify-on-complete <cmd>` | Shell command to run when the job completes |
 | `-s, --sandbox <mode>` | `read-only`, `workspace-write`, `danger-full-access` |
@@ -155,6 +157,8 @@ codex-agent send <jobId> "Focus on the authentication module instead"
 | `--clean` | Alias for `--strip-ansi` |
 | `--json` | Output JSON (jobs command only) |
 | `--interactive` | Use interactive TUI mode (supports send, idle detection) |
+| `--keep-alive` | Disable auto-exit for interactive jobs (multi-turn use) |
+| `--no-constraints` | Skip auto-injection of XML constraint blocks |
 | `--dry-run` | Preview prompt without executing |
 
 ## Jobs JSON Output
@@ -220,25 +224,44 @@ codex-agent start "Understand the architecture" --map -r high
 
 ## How It Works
 
-### Exec Mode (Default)
+### Exec Mode (Default — Spawn Runner)
 
 1. You run `codex-agent start "task"`
-2. CLI generates a launcher script and creates a detached tmux session
+2. CLI generates a launcher script (`.sh`) and spawns it as a detached child process
 3. The launcher pipes your prompt (from file) to `codex exec` via `tee` (for logging)
 4. It returns immediately with the job ID
 5. Codex works in the background and auto-exits when done
-6. The completion marker triggers and the job is marked completed
-7. You check with `jobs --json`, `capture`, `output`, or `attach`
+6. Exit code is written to `.exitcode` file — `refreshJobStatus` checks PID + exit code for accurate completion/failure
+7. You check with `jobs --json`, `capture`, or `output`
+
+> **Note:** Set `CODEX_AGENT_EXEC_RUNNER=tmux` to use tmux for exec mode (legacy behavior with `attach` support).
 
 ### Interactive Mode (`--interactive`)
 
 1. You run `codex-agent start "task" --interactive`
-2. CLI generates a launcher script with OS-appropriate `script` invocation
+2. CLI generates a launcher script with OS-appropriate `script` invocation (always uses tmux)
 3. A detached tmux session starts the Codex TUI
 4. Your prompt is sent via `send-keys` (or `load-buffer` for >5000 chars)
 5. It returns immediately with the job ID
 6. Idle detection monitors for completion (30s grace period → auto `/exit`)
 7. You can redirect with `send` if the agent needs course correction
+
+### Storage
+
+Job metadata is stored in SQLite (WAL mode) with dual-write to JSON files for backward compatibility. On first run, existing JSON jobs are automatically backfilled into SQLite.
+
+```
+~/.codex-agent/
+  codex-agent.db          # SQLite database
+  jobs/
+    <jobId>.json          # Job metadata (dual-write)
+    <jobId>.prompt        # Original prompt
+    <jobId>.log           # Terminal output
+    <jobId>.sh            # Launcher script
+    <jobId>.exitcode      # Exit code (spawn mode)
+```
+
+Manage with `codex-agent migrate` (bulk JSON→SQLite) and `codex-agent verify-storage` (sync check). Override storage backend with `CODEX_AGENT_STORAGE=json|sqlite|dual`.
 
 Session output is logged via `tee` (exec) or `script` (interactive). Session metadata is parsed from Codex's JSONL files (`~/.codex/sessions/`) to extract tokens, file modifications, and summaries.
 
@@ -259,17 +282,6 @@ This means you can just describe what you want, and Claude handles the delegatio
 The skill follows a pipeline: **Ideation -> Research -> Synthesis -> PRD -> Implementation -> Review -> Testing**. Each stage uses the appropriate agent configuration.
 
 See [plugins/codex-orchestrator/README.md](plugins/codex-orchestrator/README.md) for full plugin documentation.
-
-## Job Storage
-
-```
-~/.codex-agent/jobs/          # Directory created with 0o700 permissions
-  <jobId>.json                # Job metadata (atomic writes, 0o600)
-  <jobId>.prompt              # Original prompt text
-  <jobId>.log                 # Full terminal output
-  <jobId>.sh                  # Launcher script (exec or interactive)
-  <jobId>.turn-complete       # Signal file from notify hook (transient)
-```
 
 ## Security
 
