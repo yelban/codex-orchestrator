@@ -5,7 +5,7 @@
 
 import { openSync, readSync, closeSync, statSync } from "fs";
 import { join } from "path";
-import { config, ReasoningEffort, SandboxMode } from "./config.ts";
+import { config, ReasoningEffort, SandboxMode, Provider } from "./config.ts";
 import {
   startJob,
   loadJob,
@@ -51,6 +51,7 @@ Usage:
   codex-agent health                     Check tmux and codex availability
 
 Options:
+  --provider <name>          Provider: openai, gemini (default: openai)
   -r, --reasoning <level>    Reasoning effort: low, medium, high, xhigh (default: xhigh)
   -m, --model <model>        Model name (default: gpt-5.3-codex)
   -s, --sandbox <mode>       Sandbox: read-only, workspace-write, danger-full-access
@@ -78,10 +79,15 @@ Modes:
 Environment:
   CODEX_AGENT_STORAGE=json|sqlite|dual   Storage backend (default: dual)
   CODEX_AGENT_EXEC_RUNNER=tmux|spawn     Exec runner (default: spawn)
+  CODEX_AGENT_PROVIDER=openai|gemini     Default provider (default: openai)
+  CODEX_AGENT_GEMINI_MODEL=<model>       Gemini model (default: gemini-3.1-pro-preview)
 
 Examples:
   # Start an agent (exec mode, auto-completes)
   codex-agent start "Review this code for security issues" -f "src/**/*.ts"
+
+  # Start with Gemini provider (defaults: read-only, no-constraints)
+  codex-agent start "Analyze code" --provider gemini --map
 
   # Start in interactive mode (supports send)
   codex-agent start "Analyze code" --interactive
@@ -100,6 +106,7 @@ Examples:
 `;
 
 interface Options {
+  provider: Provider;
   reasoning: ReasoningEffort;
   model: string;
   sandbox: SandboxMode;
@@ -124,7 +131,12 @@ function parseArgs(args: string[]): {
   positional: string[];
   options: Options;
 } {
+  let sandboxExplicit = false;
+  let modelExplicit = false;
+  let noConstraintsExplicit = false;
+
   const options: Options = {
+    provider: config.provider,
     reasoning: config.defaultReasoningEffort,
     model: config.model,
     sandbox: config.defaultSandbox,
@@ -164,10 +176,12 @@ function parseArgs(args: string[]): {
       }
     } else if (arg === "-m" || arg === "--model") {
       options.model = args[++i];
+      modelExplicit = true;
     } else if (arg === "-s" || arg === "--sandbox") {
       const mode = args[++i] as SandboxMode;
       if (config.sandboxModes.includes(mode)) {
         options.sandbox = mode;
+        sandboxExplicit = true;
       } else {
         console.error(`Invalid sandbox mode: ${mode}`);
         console.error(`Valid options: ${config.sandboxModes.join(", ")}`);
@@ -193,6 +207,14 @@ function parseArgs(args: string[]): {
       options.includeMap = true;
     } else if (arg === "--no-constraints") {
       options.noConstraints = true;
+      noConstraintsExplicit = true;
+    } else if (arg === "--provider") {
+      const p = args[++i] as Provider;
+      if (!(config.providers as readonly string[]).includes(p)) {
+        console.error(`Invalid provider: ${p}. Valid: ${config.providers.join(", ")}`);
+        process.exit(1);
+      }
+      options.provider = p;
     } else if (arg === "--dry-run") {
       options.dryRun = true;
     } else if (arg === "--strip-ansi" || arg === "--clean") {
@@ -216,6 +238,13 @@ function parseArgs(args: string[]): {
         positional.push(arg);
       }
     }
+  }
+
+  // Apply Gemini defaults when not explicitly overridden
+  if (options.provider === "gemini") {
+    if (!sandboxExplicit) options.sandbox = "read-only";
+    if (!modelExplicit) options.model = config.geminiDefaultModel;
+    if (!noConstraintsExplicit) options.noConstraints = true;
   }
 
   return { command, positional, options };
@@ -244,9 +273,10 @@ function formatJobStatus(job: Job): string {
     : "-";
 
   const status = job.status.toUpperCase().padEnd(10);
+  const provider = (job.provider ?? "openai").padEnd(7);
   const promptPreview = job.prompt.slice(0, 50) + (job.prompt.length > 50 ? "..." : "");
 
-  return `${job.id}  ${status}  ${elapsed.padEnd(8)}  ${job.reasoningEffort.padEnd(6)}  ${promptPreview}`;
+  return `${job.id}  ${status}  ${elapsed.padEnd(8)}  ${provider}  ${job.reasoningEffort.padEnd(6)}  ${promptPreview}`;
 }
 
 function refreshJobsForDisplay(jobs: Job[]): Job[] {
@@ -324,8 +354,8 @@ async function handleStartCommand(
   rawPrompt: string,
   options: Options
 ): Promise<void> {
-  if (!isTmuxAvailable()) {
-    console.error("Error: tmux is required but not installed");
+  if (options.interactive && !isTmuxAvailable()) {
+    console.error("Error: tmux is required for interactive mode but not installed");
     console.error("Install with: brew install tmux");
     process.exit(1);
   }
@@ -358,9 +388,11 @@ async function handleStartCommand(
   if (options.dryRun) {
     const tokens = estimateTokens(prompt);
     console.log(`Would send ~${tokens.toLocaleString()} tokens`);
+    console.log(`Provider: ${options.provider}`);
     console.log(`Model: ${options.model}`);
     console.log(`Reasoning: ${options.reasoning}`);
     console.log(`Sandbox: ${options.sandbox}`);
+    console.log(`No-constraints: ${options.noConstraints}`);
     console.log("\n--- Prompt Preview ---\n");
     console.log(prompt.slice(0, 3000));
     if (prompt.length > 3000) {
@@ -371,6 +403,7 @@ async function handleStartCommand(
 
   const job = startJob({
     prompt,
+    provider: options.provider,
     model: options.model,
     reasoningEffort: options.reasoning,
     sandbox: options.sandbox,
@@ -382,9 +415,12 @@ async function handleStartCommand(
 
   const mode = job.interactive ? "interactive" : "exec";
   console.log(`Job started: ${job.id} (${mode} mode)`);
+  console.log(`Provider: ${job.provider ?? "openai"}`);
   console.log(`Model: ${job.model} (${job.reasoningEffort})`);
   console.log(`Working dir: ${job.cwd}`);
-  console.log(`tmux session: ${job.tmuxSession}`);
+  if (job.tmuxSession) {
+    console.log(`tmux session: ${job.tmuxSession}`);
+  }
   console.log("");
   console.log("Commands:");
   console.log(`  Capture output:  codex-agent capture ${job.id}`);
@@ -474,6 +510,7 @@ async function main() {
 
         console.log(`Job: ${job.id}`);
         console.log(`Status: ${job.status}`);
+        console.log(`Provider: ${job.provider ?? "openai"}`);
         console.log(`Model: ${job.model} (${job.reasoningEffort})`);
         console.log(`Sandbox: ${job.sandbox}`);
         console.log(`Created: ${job.createdAt}`);
@@ -622,11 +659,12 @@ async function main() {
         }
 
         const lines = positional[1] ? parseInt(positional[1], 10) : 50;
+        const captureJob = loadJob(positional[0]);
         let output = getJobOutput(positional[0], lines);
 
         if (output) {
           if (options.stripAnsi) {
-            output = cleanTerminalOutput(output);
+            output = cleanTerminalOutput(output, (captureJob?.provider ?? "openai") as Provider);
           }
           console.log(output);
         } else {
@@ -642,10 +680,11 @@ async function main() {
           process.exit(1);
         }
 
+        const outputJob = loadJob(positional[0]);
         let output = getJobFullOutput(positional[0]);
         if (output) {
           if (options.stripAnsi) {
-            output = cleanTerminalOutput(output);
+            output = cleanTerminalOutput(output, (outputJob?.provider ?? "openai") as Provider);
           }
           console.log(output);
         } else {
@@ -678,13 +717,17 @@ async function main() {
         }
 
         const job = loadJob(positional[0]);
-        if (!job || !job.tmuxSession) {
-          console.error(`Job ${positional[0]} not found or no tmux session`);
+        if (!job) {
+          console.error(`Job ${positional[0]} not found`);
           process.exit(1);
         }
 
-        console.error(`Watching ${job.tmuxSession}... (Ctrl+C to stop)`);
-        console.error("For interactive mode, use: tmux attach -t " + job.tmuxSession);
+        if (job.tmuxSession) {
+          console.error(`Watching ${job.tmuxSession}... (Ctrl+C to stop)`);
+          console.error("For interactive mode, use: tmux attach -t " + job.tmuxSession);
+        } else {
+          console.error(`Watching job ${job.id}... (Ctrl+C to stop)`);
+        }
         console.error("");
 
         // Log-file byte-offset tracking to avoid duplicate output
@@ -708,7 +751,7 @@ async function main() {
                 readSync(fd, buf, 0, buf.length, logOffset);
                 let chunk = buf.toString("utf-8");
                 if (options.stripAnsi) {
-                  chunk = cleanTerminalOutput(chunk);
+                  chunk = cleanTerminalOutput(chunk, (job.provider ?? "openai") as Provider);
                 }
                 if (chunk.trim()) {
                   process.stdout.write(chunk);
@@ -766,8 +809,8 @@ async function main() {
         if (jobs.length === 0) {
           console.log("No jobs");
         } else {
-          console.log("ID        STATUS      ELAPSED   EFFORT  PROMPT");
-          console.log("-".repeat(80));
+          console.log("ID        STATUS      ELAPSED   PROVIDER  EFFORT  PROMPT");
+          console.log("-".repeat(90));
           for (const job of jobs) {
             console.log(formatJobStatus(job));
           }

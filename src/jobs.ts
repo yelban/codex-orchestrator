@@ -2,7 +2,7 @@
 
 import { readFileSync, unlinkSync, statSync } from "fs";
 import { join } from "path";
-import { config, ReasoningEffort, SandboxMode } from "./config.ts";
+import { config, ReasoningEffort, SandboxMode, Provider } from "./config.ts";
 import { randomBytes } from "crypto";
 import { extractSessionId, findSessionFile, parseSessionFile, type ParsedSessionData } from "./session-parser.ts";
 import { getStore } from "./store/index.ts";
@@ -37,6 +37,7 @@ export interface Job {
   pid?: number; // spawn-mode: process ID
   exitCode?: number; // spawn-mode: exit code after completion
   runner?: "tmux" | "spawn"; // which runner launched this job
+  provider?: Provider; // which provider (openai or gemini)
   result?: string; // deprecated: no longer written, kept for backward compat
   resultPreview?: string; // last 500 chars of output
   error?: string;
@@ -140,6 +141,7 @@ export type JobsJsonEntry = {
   id: string;
   status: Job["status"];
   prompt: string;
+  provider: Provider;
   model: string;
   reasoning: ReasoningEffort;
   cwd: string;
@@ -168,7 +170,7 @@ export function getJobsJson(): JobsJsonOutput {
     let filesModified: ParsedSessionData["files_modified"] | null = null;
     let summary: string | null = null;
 
-    if (effective.status === "completed") {
+    if (effective.status === "completed" && (effective.provider ?? "openai") === "openai") {
       if (effective.enrichment) {
         // Use cached enrichment data (avoids repeated session file scans)
         tokens = effective.enrichment.tokens;
@@ -196,6 +198,7 @@ export function getJobsJson(): JobsJsonOutput {
       id: effective.id,
       status: effective.status,
       prompt: truncateText(effective.prompt, 100),
+      provider: (effective.provider ?? "openai") as Provider,
       model: effective.model,
       reasoning: effective.reasoningEffort,
       cwd: effective.cwd,
@@ -241,6 +244,7 @@ export function deleteJob(jobId: string): boolean {
 
 export interface StartJobOptions {
   prompt: string;
+  provider?: Provider;
   model?: string;
   reasoningEffort?: ReasoningEffort;
   sandbox?: SandboxMode;
@@ -253,6 +257,24 @@ export interface StartJobOptions {
 export function startJob(options: StartJobOptions): Job {
   const jobId = generateJobId();
   const cwd = options.cwd || process.cwd();
+  const provider: Provider = options.provider ?? config.provider;
+
+  // Fail-fast validation for Gemini incompatibilities
+  if (provider === "gemini") {
+    if (options.interactive) {
+      throw new Error("Gemini does not support interactive mode.");
+    }
+    if (config.execRunner === "tmux") {
+      throw new Error("Gemini requires spawn runner. Set CODEX_AGENT_EXEC_RUNNER=spawn.");
+    }
+    // Check Gemini CLI exists
+    try {
+      const { execSync } = require("child_process");
+      execSync("which gemini", { stdio: "ignore" });
+    } catch {
+      throw new Error("Gemini CLI not found. Install: https://github.com/google-gemini/gemini-cli");
+    }
+  }
 
   // Determine runner: spawn for exec mode (when configured), tmux for interactive or default
   const useSpawn = config.execRunner === "spawn" && !options.interactive;
@@ -270,6 +292,7 @@ export function startJob(options: StartJobOptions): Job {
     interactive: options.interactive || false,
     keepAlive: options.keepAlive || false,
     runner: useSpawn ? "spawn" : "tmux",
+    provider,
   };
 
   saveJob(job);
@@ -282,6 +305,7 @@ export function startJob(options: StartJobOptions): Job {
       model: job.model,
       reasoningEffort: job.reasoningEffort,
       sandbox: job.sandbox,
+      provider: job.provider ?? "openai",
       cwd,
     });
 
@@ -470,7 +494,21 @@ function refreshSpawnJob(job: Job): void {
   if (!job.pid) return;
 
   if (isProcessAlive(job.pid)) {
-    // Still running — check inactivity timeout
+    // Still running — check Gemini hard max runtime
+    if ((job.provider ?? "openai") === "gemini") {
+      const elapsedMs = computeElapsedMs(job);
+      const hardMaxMs = config.geminiHardMaxRuntimeMinutes * 60 * 1000;
+      if (elapsedMs > hardMaxMs) {
+        try { process.kill(job.pid, "SIGTERM"); } catch { /* already gone */ }
+        job.status = "failed";
+        job.error = `Gemini hard max runtime exceeded (${config.geminiHardMaxRuntimeMinutes} min)`;
+        job.completedAt = new Date().toISOString();
+        saveJob(job);
+        return;
+      }
+    }
+
+    // Check inactivity timeout
     if (isInactiveTimedOut(job)) {
       try { process.kill(job.pid, "SIGTERM"); } catch { /* already gone */ }
       job.status = "failed";
@@ -481,20 +519,12 @@ function refreshSpawnJob(job: Job): void {
     return;
   }
 
-  // Process exited — determine success/failure via exit code
+  // Process exited — exit code is authoritative
   job.completedAt = new Date().toISOString();
   const exitCode = readExitCode(job.id);
   job.exitCode = exitCode ?? undefined;
 
-  const logFile = join(config.jobsDir, `${job.id}.log`);
-  let logContent: string | null = null;
-  try {
-    logContent = readFileSync(logFile, "utf-8");
-  } catch { /* no log */ }
-
   if (exitCode === 0) {
-    job.status = "completed";
-  } else if (logContent && logContent.includes("[codex-agent: Session complete")) {
     job.status = "completed";
   } else {
     job.status = "failed";
@@ -503,9 +533,12 @@ function refreshSpawnJob(job: Job): void {
       : "Process exited unexpectedly (no exit code file)";
   }
 
-  if (logContent) {
+  const logFile = join(config.jobsDir, `${job.id}.log`);
+  try {
+    const logContent = readFileSync(logFile, "utf-8");
     job.resultPreview = logContent.slice(-500);
-  }
+  } catch { /* no log */ }
+
   saveJob(job);
 }
 

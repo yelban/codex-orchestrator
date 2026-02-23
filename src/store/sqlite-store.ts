@@ -4,9 +4,10 @@ import { Database } from "bun:sqlite";
 import { config } from "../config.ts";
 import { ensureDirSync } from "../fs-utils.ts";
 import type { Job } from "../jobs.ts";
+import type { Provider } from "../config.ts";
 import type { JobStore } from "./job-store.ts";
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 const CREATE_TABLES = `
 CREATE TABLE IF NOT EXISTS jobs (
@@ -25,6 +26,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   pid INTEGER,
   exit_code INTEGER,
   runner TEXT NOT NULL DEFAULT 'tmux',
+  provider TEXT NOT NULL DEFAULT 'openai',
   result_preview TEXT,
   error TEXT,
   interactive INTEGER NOT NULL DEFAULT 0,
@@ -61,6 +63,7 @@ type JobRow = {
   pid: number | null;
   exit_code: number | null;
   runner: string;
+  provider: string;
   result_preview: string | null;
   error: string | null;
   interactive: number;
@@ -92,6 +95,7 @@ function jobToRow(job: Job): JobRow {
     pid: job.pid ?? null,
     exit_code: job.exitCode ?? null,
     runner: job.runner ?? "tmux",
+    provider: job.provider ?? "openai",
     result_preview: job.resultPreview ?? null,
     error: job.error ?? null,
     interactive: job.interactive ? 1 : 0,
@@ -133,6 +137,7 @@ function rowToJob(row: JobRow): Job {
     pid: row.pid ?? undefined,
     exitCode: row.exit_code ?? undefined,
     runner: (row.runner as Job["runner"]) ?? undefined,
+    provider: (row.provider as Provider) ?? "openai",
     resultPreview: row.result_preview ?? undefined,
     error: row.error ?? undefined,
     interactive: row.interactive === 1,
@@ -183,6 +188,13 @@ export class SqliteStore implements JobStore {
       if (!existing.has("exit_code")) this.db.exec("ALTER TABLE jobs ADD COLUMN exit_code INTEGER");
       if (!existing.has("runner")) this.db.exec("ALTER TABLE jobs ADD COLUMN runner TEXT NOT NULL DEFAULT 'tmux'");
     }
+    if (fromVersion < 3) {
+      const cols = this.db.prepare("PRAGMA table_info(jobs)").all() as { name: string }[];
+      const existing = new Set(cols.map((c) => c.name));
+      if (!existing.has("provider")) {
+        this.db.exec("ALTER TABLE jobs ADD COLUMN provider TEXT NOT NULL DEFAULT 'openai'");
+      }
+    }
   }
 
   /** Build $-prefixed params object from a JobRow for binding. */
@@ -200,7 +212,7 @@ export class SqliteStore implements JobStore {
     return [
       "id", "status", "prompt", "model", "reasoning_effort", "sandbox",
       "parent_session_id", "cwd", "created_at", "started_at", "completed_at",
-      "tmux_session", "pid", "exit_code", "runner",
+      "tmux_session", "pid", "exit_code", "runner", "provider",
       "result_preview", "error", "interactive", "keep_alive",
       "idle_detected_at", "exit_sent", "turn_count", "last_turn_completed_at",
       "last_agent_message", "turn_state", "enrichment_json", "updated_at",

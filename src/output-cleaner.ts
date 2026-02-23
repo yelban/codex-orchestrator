@@ -26,7 +26,9 @@ const CHROME_ONLY_LINE_PATTERNS: RegExp[] = [
   /background terminal running\b.*\/ps to view/i,
 ];
 
-function stripControlSequences(text: string): string {
+import type { Provider } from "./config.ts";
+
+export function stripControlSequences(text: string): string {
   return text
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "\n")
@@ -149,8 +151,7 @@ export function stripAnsiCodes(text: string): string {
   return stripControlSequences(text);
 }
 
-export function cleanTerminalOutput(text: string): string {
-  const stripped = stripControlSequences(text);
+function cleanOpenAiChrome(stripped: string): string {
   const outputLines: string[] = [];
   let previousLine = "";
 
@@ -184,4 +185,29 @@ export function cleanTerminalOutput(text: string): string {
   }
 
   return outputLines.join("\n");
+}
+
+/** Conservative Gemini cleaner — strip control sequences + collapse blank lines only. */
+function cleanGeminiChrome(stripped: string): string {
+  const lines: string[] = [];
+  let prev = "";
+  for (const raw of stripped.split("\n")) {
+    const line = raw.replace(/\uFFFD/g, "").trimEnd();
+    if (!line.trim()) {
+      if (lines.length > 0 && lines[lines.length - 1] !== "") lines.push("");
+      continue;
+    }
+    if (line === prev) continue;
+    lines.push(line);
+    prev = line;
+  }
+  while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  return lines.join("\n");
+}
+
+export function cleanTerminalOutput(text: string, provider: Provider = "openai"): string {
+  const stripped = stripControlSequences(text);
+  return provider === "openai"
+    ? cleanOpenAiChrome(stripped)
+    : cleanGeminiChrome(stripped);
 }

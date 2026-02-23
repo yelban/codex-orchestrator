@@ -4,7 +4,7 @@
 import { spawn } from "child_process";
 import { openSync, constants } from "fs";
 import { join } from "path";
-import { config } from "./config.ts";
+import { config, Provider } from "./config.ts";
 import { atomicWriteFileSync, ensureDirSync } from "./fs-utils.ts";
 
 function shellQuote(s: string): string {
@@ -45,11 +45,36 @@ function buildSpawnLauncher(opts: {
     `  -s ${q(opts.sandbox)} \\`,
     `  ${approvalFlag} \\`,
     `  --json - 2>&1 | tee ${q(opts.logFile)}`,
-    "EXIT_CODE=$?",
+    "EXIT_CODE=${PIPESTATUS[0]}",
     "",
     `printf '\\n\\n[codex-agent: Session complete. Exit code: %d]\\n' $EXIT_CODE >> ${q(opts.logFile)}`,
     `echo $EXIT_CODE > ${q(opts.exitCodeFile)}`,
     "",
+  ].join("\n");
+}
+
+function getGeminiSandboxFlag(sandbox: string): string {
+  return sandbox === "read-only" ? "-s" : "--yolo";
+}
+
+function buildGeminiLauncher(opts: {
+  promptFile: string;
+  logFile: string;
+  exitCodeFile: string;
+  model: string;
+  sandbox: string;
+}): string {
+  const q = shellQuote;
+  const sandboxFlag = getGeminiSandboxFlag(opts.sandbox);
+  return [
+    "#!/bin/bash",
+    "set -uo pipefail",
+    "",
+    `cat ${q(opts.promptFile)} | gemini -p '' ${sandboxFlag} -m ${q(opts.model)} -o text 2>&1 | tee ${q(opts.logFile)}`,
+    "EXIT_CODE=${PIPESTATUS[0]}",
+    "",
+    `printf '\\n\\n[codex-agent: Session complete. Exit code: %d]\\n' $EXIT_CODE >> ${q(opts.logFile)}`,
+    `echo $EXIT_CODE > ${q(opts.exitCodeFile)}`,
   ].join("\n");
 }
 
@@ -70,6 +95,7 @@ export function spawnExecJob(options: {
   model: string;
   reasoningEffort: string;
   sandbox: string;
+  provider: string;
   cwd: string;
 }): SpawnResult {
   ensureDirSync(config.jobsDir);
@@ -82,15 +108,23 @@ export function spawnExecJob(options: {
   // Write prompt file
   atomicWriteFileSync(promptFile, options.prompt);
 
-  // Build and write launcher script
-  const launcher = buildSpawnLauncher({
-    promptFile,
-    logFile,
-    exitCodeFile,
-    model: options.model,
-    reasoningEffort: options.reasoningEffort,
-    sandbox: options.sandbox,
-  });
+  // Build and write launcher script (route by provider)
+  const launcher = options.provider === "gemini"
+    ? buildGeminiLauncher({
+        promptFile,
+        logFile,
+        exitCodeFile,
+        model: options.model,
+        sandbox: options.sandbox,
+      })
+    : buildSpawnLauncher({
+        promptFile,
+        logFile,
+        exitCodeFile,
+        model: options.model,
+        reasoningEffort: options.reasoningEffort,
+        sandbox: options.sandbox,
+      });
   atomicWriteFileSync(launcherFile, launcher, 0o700);
 
   try {

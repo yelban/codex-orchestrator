@@ -857,6 +857,96 @@ codex-agent status $job2
 codex-agent send $job2 "/quit"
 ```
 
+## Multi-Provider Patterns
+
+The CLI supports `--provider openai|gemini`. Use these patterns when cross-model analysis adds value.
+
+### Pattern A: Parallel Analysis (reviewing existing code)
+
+**When**: Analytical reasoning on project-specific code (bugs, security, architecture).
+**Why**: Both providers analyze the SAME code; different analytical approaches = useful signal.
+**Constraint**: At least one provider MUST be read-only to prevent filesystem races.
+
+```bash
+codex-agent start "review src/auth.ts for vulnerabilities" --provider openai -s read-only --map
+codex-agent start "review src/auth.ts for vulnerabilities" --provider gemini --map
+# Gemini defaults to read-only; OpenAI explicitly set here
+# await both, then synthesize per Synthesis Protocol below
+```
+
+### Pattern B: Generate → Adversarial Review (code generation)
+
+**When**: Implementing or refactoring features.
+**Why**: Parallel generation produces style noise; sequential review produces substantive critique.
+
+```bash
+codex-agent start "implement auth refactor per PRD" --provider openai --map
+# await completion, read output
+codex-agent start "review this implementation for correctness, security, and edge cases: [paste output]" --provider gemini --map
+# await, synthesize implementation + critique
+```
+
+### Pattern C: Specialist Routing (context-heavy tasks)
+
+**When**: Task requires 50+ files, cross-service analysis, large log analysis.
+**Why**: Gemini's context window advantage is decisive; single provider is sufficient.
+
+```bash
+codex-agent start "analyze dependency graph across all services" --provider gemini --map
+# No consensus needed — specialist routing
+```
+
+### When NOT to Use Multi-Provider
+
+- Pattern-recognition tasks on common code (JWT, bcrypt) — correlated training = correlated blind spots
+- Vague specs ("make it better") — divergence reflects ambiguity, not quality
+- Trivial tasks — cost and latency not justified
+- Subjective preferences (naming, formatting) — consensus is coincidence
+
+## Synthesis Protocol (Multi-Provider)
+
+### Pre-Synthesis
+
+1. Randomly relabel provider outputs as "Analysis Alpha" and "Analysis Beta".
+   Do NOT reveal which model produced which until AFTER synthesis.
+
+### Hard-Fail Preconditions (stop, do not synthesize)
+
+- Either job status ≠ completed → report failure
+- Either exit code ≠ 0 → report failure
+- Either output is empty or clearly off-topic → flag and explain
+
+### Synthesis Steps (all four required, in order)
+
+1. **Enumerate differences** — List every divergence between Alpha and Beta.
+   Do NOT evaluate or judge. Format: "Alpha says X; Beta says Y."
+
+2. **Steel-man unique findings** — For each finding reported by only one analysis:
+   argue FOR it. Cite specific code or context that supports it.
+   Do NOT evaluate yet.
+
+3. **Require technical rebuttal** — For each unique finding:
+   attempt to rebut with specific code evidence.
+   PROHIBITED: Labeling any finding as "false positive" without citing
+   (a) specific code evidence and (b) why the analysis's reasoning is wrong.
+
+4. **Preserve unrebutted** — If you cannot technically rebut a finding,
+   it MUST appear in the final synthesis, even if you disagree with severity.
+
+### Rules
+
+- Never request or use self-reported scoring (e.g., Security: X/10)
+- Output length is not a quality signal
+- Agreement between providers is not proof of correctness (correlated training)
+- For high-stakes tasks: use two separate synthesis passes (advocacy then judgment)
+  to disrupt latent reasoning chain bias
+
+## Parallel Sandbox Safety
+
+- In Pattern A (parallel execution), at least one provider MUST run read-only
+- Default: Gemini is read-only unless user explicitly sets sandbox
+- If both need write access: run sequentially, not in parallel
+
 ## Quality Gates
 
 Before marking any stage complete:

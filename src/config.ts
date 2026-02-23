@@ -4,6 +4,7 @@ export type ReasoningEffort = "low" | "medium" | "high" | "xhigh";
 export type SandboxMode = "read-only" | "workspace-write" | "danger-full-access";
 export type StorageMode = "json" | "sqlite" | "dual";
 export type ExecRunner = "tmux" | "spawn";
+export type Provider = "openai" | "gemini";
 
 export const config = {
   // Default model
@@ -40,6 +41,12 @@ export const config = {
 
   // Exec runner (spawn = detached child_process, tmux = tmux session)
   execRunner: (process.env.CODEX_AGENT_EXEC_RUNNER || "spawn") as ExecRunner,
+
+  // Provider selection
+  provider: (process.env.CODEX_AGENT_PROVIDER || "openai") as Provider,
+  providers: ["openai", "gemini"] as const,
+  geminiDefaultModel: process.env.CODEX_AGENT_GEMINI_MODEL || "gemini-3.1-pro-preview",
+  geminiHardMaxRuntimeMinutes: Number(process.env.CODEX_AGENT_GEMINI_HARD_MAX_MINUTES || 30),
 
   // File loading limits
   maxFileCount: 200,

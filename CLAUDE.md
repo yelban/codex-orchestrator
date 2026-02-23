@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-CLI tool for delegating tasks to GPT Codex agents. Exec mode uses detached `child_process.spawn` (no tmux); interactive mode uses tmux TUI. Designed for Claude Code orchestration with bidirectional communication.
+CLI tool for delegating tasks to GPT Codex and Gemini agents. Exec mode uses detached `child_process.spawn` (no tmux); interactive mode uses tmux TUI. Designed for Claude Code orchestration with bidirectional communication.
 
-**Stack**: TypeScript, Bun, SQLite (bun:sqlite), tmux (interactive only), OpenAI Codex CLI
+**Stack**: TypeScript, Bun, SQLite (bun:sqlite), tmux (interactive only), OpenAI Codex CLI, Gemini CLI
 
 ## Development
 
@@ -36,10 +36,10 @@ bin/codex-agent (shell wrapper)
     → src/files.ts (glob-based file loading with path boundary checks)
     → src/prompt-constraints.ts (auto-inject XML constraint blocks)
     → src/fs-utils.ts (atomic writes, secure directory creation)
-    → src/config.ts (defaults: model, reasoning, sandbox, timeout, storage, runner)
+    → src/config.ts (defaults: model, reasoning, sandbox, timeout, storage, runner, provider)
 ```
 
-**Data flow (exec mode, default — spawn runner)**: `start` writes prompt to `.prompt` file → generates launcher `.sh` script → spawns detached `bash <launcher>` via `child_process.spawn` → launcher pipes prompt to `codex exec` via `tee` → codex auto-completes → exit code written to `.exitcode` file → `refreshJobStatus` checks PID liveness + exit code for accurate completion/failure detection.
+**Data flow (exec mode, default — spawn runner)**: `start` writes prompt to `.prompt` file → generates provider-specific launcher `.sh` script (OpenAI or Gemini) → spawns detached `bash <launcher>` via `child_process.spawn` → launcher pipes prompt to `codex exec` or `gemini` via `tee` → provider auto-completes → exit code written to `.exitcode` file via `PIPESTATUS[0]` → `refreshJobStatus` checks PID liveness + exit code for accurate completion/failure detection.
 
 **Data flow (exec mode — tmux runner fallback)**: Same as above but runs inside a detached tmux session. Set `CODEX_AGENT_EXEC_RUNNER=tmux` to use. Marker string `[codex-agent: Session complete` used for completion detection.
 
@@ -51,11 +51,15 @@ bin/codex-agent (shell wrapper)
 
 ## Key Behaviors & Gotchas
 
+- **Multi-provider support**: `--provider openai|gemini` selects provider. Default `openai`. Gemini uses spawn runner only (no tmux, no interactive).
+- **Gemini defaults**: When `--provider gemini`, auto-applies `sandbox=read-only`, `model=gemini-3.1-pro-preview`, `noConstraints=true` unless explicitly overridden.
+- **Gemini hard max runtime**: Gemini jobs killed after `geminiHardMaxRuntimeMinutes` (default 30 min) to prevent silent hangs.
+- **Gemini enrichment**: Skipped — session-parser only handles Codex JSONL format. `tokens`, `files_modified`, `summary` are `null` for Gemini jobs.
 - **Dual modes + dual runners**: Exec mode defaults to spawn runner (no tmux); interactive mode always uses tmux TUI. Set `CODEX_AGENT_EXEC_RUNNER=tmux` for legacy exec behavior.
-- **Completion detection (exec/spawn)**: Process exit → exit code file checked; exit 0 = completed, non-zero = failed with error message
+- **Completion detection (exec/spawn)**: Process exit → exit code file checked via `PIPESTATUS[0]`; exit 0 = completed, non-zero = failed. Exit code is authoritative — completion marker does NOT override non-zero exits.
 - **Completion detection (exec/tmux)**: Marker string `[codex-agent: Session complete` in log/pane output
 - **Completion detection (interactive)**: Idle detection — `? for shortcuts` pattern matched at line start in last 5 pane lines + log mtime stable for 30s → auto-sends `/exit`
-- **Auto-constraint injection**: `<design_and_scope_constraints>` and `<context_loading>` XML blocks auto-appended to all prompts (with dedup detection); opt-out with `--no-constraints`
+- **Auto-constraint injection**: `<design_and_scope_constraints>` and `<context_loading>` XML blocks auto-appended to all prompts (with dedup detection); opt-out with `--no-constraints`. Gemini auto-disables constraints.
 - **Idle detection safety**: 30s grace period, log mtime stability check, `exitSent` flag prevents duplicates, false positive recovery when codex resumes; `--keep-alive` disables auto-exit entirely
 - **send command**: Only works for `--interactive` jobs; exec mode jobs reject send with error; also blocked when `/exit` already sent
 - **Launcher scripts**: Each job generates a `.sh` launcher script; tmux runs `bash <launcher>` — user prompts never embedded in shell commands
@@ -93,6 +97,9 @@ plugins/codex-orchestrator/
 | idleGracePeriodSeconds | `30` |
 | storageMode | `dual` (env: `CODEX_AGENT_STORAGE`) |
 | execRunner | `spawn` (env: `CODEX_AGENT_EXEC_RUNNER`) |
+| provider | `openai` (env: `CODEX_AGENT_PROVIDER`) |
+| geminiDefaultModel | `gemini-3.1-pro-preview` (env: `CODEX_AGENT_GEMINI_MODEL`) |
+| geminiHardMaxRuntimeMinutes | `30` (env: `CODEX_AGENT_GEMINI_HARD_MAX_MINUTES`) |
 | sqliteDbPath | `~/.codex-agent/codex-agent.db` |
 | maxFileCount | `200` |
 | defaultExcludes | `node_modules, .git, dist, .codex, .next, __pycache__` |
@@ -117,11 +124,22 @@ Job IDs: 8 random hex chars. Session names: `codex-agent-<jobId>`.
 
 CLI management: `codex-agent migrate` (JSON→SQLite bulk import), `codex-agent verify-storage` (sync check).
 
+## Codebase Overview
+
+CLI tool for delegating tasks to GPT Codex and Gemini agents, designed as a Claude Code orchestration layer with bidirectional communication.
+
+**Stack**: TypeScript, Bun, SQLite (bun:sqlite, WAL), tmux (interactive only), OpenAI Codex CLI, Gemini CLI
+**Structure**: `src/cli.ts` (command router) → `src/jobs.ts` (lifecycle) → spawn-runner (provider-routed) or tmux → `src/store/` (DualStore default) → `~/.codex-agent/`
+
+For detailed architecture, see [docs/CODEBASE_MAP.md](docs/CODEBASE_MAP.md).
+
 ## Claude Orchestration Pattern (Persisted)
 
 - Use `codex-agent start "<task>"` without `--wait` for background orchestration.
+- Use `codex-agent start "<task>" --provider gemini` for Gemini jobs.
 - Track job IDs immediately.
 - Use `codex-agent await-turn <id>` to block until agent finishes current turn (preferred).
 - Use `codex-agent status <id>` to check running/completed state.
 - Use `codex-agent capture <id> [n]` for incremental tails while running.
 - Use `codex-agent output <id>` for final transcript after completion.
+- Multi-provider patterns (parallel analysis, generate→review, specialist routing) are documented in SKILL.md.
