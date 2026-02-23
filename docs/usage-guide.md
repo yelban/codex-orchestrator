@@ -1,220 +1,493 @@
-# Codex Orchestrator 使用指南
+# Codex Orchestrator 開發使用指南
 
-## 快速開始
+## 這是什麼？
 
-### 1. 環境準備
+Codex Orchestrator 讓你用 Claude Code 指揮 OpenAI Codex agent 軍團完成複雜的開發任務。
 
-```bash
-codex-agent health    # 確認 tmux + codex 可用
+**效果**：原本你自己要花數小時的工作（讀 code、規劃、實作、review），交給 agent 平行執行，你只需要做高階決策。一個下午能完成的工作量，用這套系統可以在早上就完成。
+
+### 三層結構
+
+```
+你（指揮官）── 提需求、確認方向、做決策
+      ↓
+  Claude（將軍）── 分析需求、拆任務、派 agent、彙整結果
+      ↓
+Codex Agent（士兵）── 讀程式碼、實作、測試、審查
 ```
 
-若未安裝，執行 `/codex-orchestrator init` 或：
+**你不需要手動打 `codex-agent` 指令**。你只需要跟 Claude 說要做什麼，其餘全部自動化。
 
-```bash
-bash ~/.codex-orchestrator/plugins/codex-orchestrator/scripts/install.sh
-codex --login         # 認證 OpenAI
+---
+
+## 環境初始化（首次使用）
+
+### 為什麼需要初始化？
+
+Codex agent 需要 tmux（背景執行環境）、Bun（執行環境）和 Codex CLI（核心引擎），三者缺一不可。
+
+### 步驟
+
+```
+/codex-orchestrator init
 ```
 
-### 2. 產生 Codebase Map
+這個指令會自動：
+- 檢查 tmux、Bun、Codex CLI 是否存在
+- 安裝缺少的依賴
+- 把 `codex-agent` 加到 PATH
+- 跑 health check 確認一切就緒
 
-進入專案目錄後：
+### 驗證
+
+```bash
+codex-agent health
+# 應看到：tmux: OK / codex: OK / Status: Ready
+```
+
+**初始化只需要做一次**。之後每次開 Claude Code 都直接可用。
+
+---
+
+## 新專案啟動（每個新專案第一次）
+
+### 為什麼要建 Codebase Map？
+
+沒有 map 的 agent 像瞎子摸象：它要自己探索 100+ 個檔案才能理解架構，浪費 10-20 分鐘在「看地圖」而不是「做事」。
+
+有 map 的 agent 開局就知道：哪個模組在哪、資料怎麼流、命名慣例是什麼。直接開工。
+
+### 步驟
 
 ```
 /cartographer
 ```
 
-產出 `docs/CODEBASE_MAP.md`，後續所有 agent 透過 `--map` 即可獲得完整架構理解。
-**每次大改動後建議重跑**，確保 map 反映最新程式碼。
+**耗時**：5-15 分鐘（依專案大小）
 
-## 在 Claude Code 中使用
+**產出**：`docs/CODEBASE_MAP.md`，包含：
+- 所有檔案的用途說明
+- 模組邊界和依賴關係
+- 資料流
+- 命名慣例
 
-### 方式一：Skill 自動觸發（推薦）
+**預期效果**：後續每個 agent 耗時約減少 15-25 分鐘，因為不用自己探索架構。
 
-直接描述任務，skill 自動觸發：
+### 何時需要重建 Map？
 
-```
-幫我實作 P4 的 auth 重構，PRD 在 docs/prds/p4-auth.md
-```
-
-或明確呼叫：
-
-```
-/codex-orchestrator
-```
-
-Claude 會自動接管：解析需求 → 派 agent → 監控進度 → 彙整結果。
-不需要手動打 CLI 指令，Claude 會自動加 `--map`。
-
-### 方式二：手動下 CLI 指令
-
-在對話中請 Claude 執行特定指令：
+- 大規模重構後（模組結構改變）
+- 新增主要功能模組後
+- 定期維護（每週一次）
 
 ```
-請用 codex-agent 跑以下任務：
-1. read-only 調查目前 auth 模組的現狀
-2. workspace-write 實作 PRD 裡的 Phase 1
-兩個平行跑，都要加 --map
+/cartographer    # 重跑會自動 diff，只更新有變動的部分
 ```
 
-Claude 會透過 Bash 工具幫你執行 `codex-agent start ...` 指令。
+---
 
-### 兩種方式比較
+## 日常開發流程
 
-| | Skill 模式 | 手動 CLI |
-|---|---|---|
-| 誰決定怎麼拆任務 | Claude 自主判斷 | 你指定 |
-| 監控回報 | Claude 自動追蹤 | 你主動要求才查 |
-| 適合場景 | 大方向交給 Claude | 你已經知道怎麼拆 |
-
-## 專案階段轉換（以 P3→P4 為例）
-
-### Step 1：更新 Map
-
-P3 完成後程式碼已變動，先更新：
+### 核心概念：你只需要說需求
 
 ```
-/cartographer
+你：幫我加 rate limiting 到所有 API endpoint
 ```
 
-### Step 2：研究階段 — read-only agent
+Claude 自動：
+1. 判斷任務規模（是否需要 PRD）
+2. 派研究 agent 了解現有架構
+3. 提出方案給你確認
+4. 派實作 agent 執行
+5. 派 review agent 審查
+6. 回報結果
 
+### 任務規模對應策略
+
+| 規模 | 判斷標準 | Claude 的做法 |
+|------|----------|---------------|
+| 微小 | < 50 行、單一檔案、明確改法 | Claude 直接動手，不派 agent |
+| 中型 | 多檔案、單一功能 | 1-2 個 agent 直接實作 |
+| 大型 | 跨模組、架構影響 | 研究 → PRD → 分 phase 實作 |
+| 超大 | 重構整個系統 | 多個 Claude 視窗各帶 agent 軍團 |
+
+---
+
+## 場景範例
+
+### 場景 1：調查現有程式碼
+
+**情境**：你想知道 cache 的現狀，再決定要不要改
+
+**你說：**
+```
+幫我調查目前整個專案的 cache 實作，有哪些地方用到、用了什麼方式、有什麼問題？
+```
+
+**Claude 的做法：**
+- 派 read-only agent（不能改檔案，只能讀），帶 `--map` 開局知道架構
+- 指示 agent 搜尋所有 cache 相關的程式碼
+- 等 agent 完成（約 10-20 分鐘）
+- 彙整調查結果回報
+
+**你會收到類似：**
+```
+調查結果：
+- 發現 3 種不同的 cache 實作：Redis（auth）、記憶體（session）、無 cache（user）
+- /api/users/:id 沒有 cache，每次查 DB，高頻端點有效能風險
+- cache TTL 設定散落在 5 個檔案，設定不一致（30s 到 5min 不等）
+- 建議：統一使用 Redis，集中 TTL 設定
+
+要我寫一個重構 PRD 嗎？
+```
+
+**預期效果**：你用 15 分鐘（等待時間）就完成了本來要花 1-2 小時自己讀 code 的調查工作。
+
+---
+
+### 場景 2：實作新功能（有 PRD）
+
+**情境**：你已經有規劃好的 PRD，要開始做
+
+**你說：**
+```
+幫我實作 docs/prds/rate-limiting.md 的 Phase 1
+```
+
+**Claude 的做法：**
+1. 派 agent 讀 PRD 全文 + 所有 PRD 列出的相關檔案
+2. agent 按 PRD 規格實作 Phase 1
+3. agent 自己跑 typecheck 確認沒有 TypeScript 錯誤
+4. 完成後回報修改的檔案清單和摘要
+
+**你會收到類似：**
+```
+Phase 1 完成。
+
+修改的檔案：
+- src/middleware/rate-limit.ts（新增）
+- src/app.ts（注入 middleware）
+- src/config.ts（加入 rate limit 設定）
+
+agent 自行驗證：
+- TypeScript 編譯通過
+- 現有測試全部通過
+- 測試了 /api/users 和 /api/posts 的 rate limit 觸發
+
+要繼續做 Phase 2 嗎？
+```
+
+**預期效果**：你確認 PRD 後就能去做別的事，30-40 分鐘後回來看結果。
+
+---
+
+### 場景 3：實作新功能（無 PRD，需要規劃）
+
+**情境**：你有想法但還沒有詳細規劃
+
+**你說：**
+```
+我想加 webhook 功能，讓用戶可以訂閱事件通知
+```
+
+**Claude 的做法：**
+1. 派 agent 調查現有的事件系統和 API 結構
+2. 根據調查結果，提出實作方案給你討論
+3. 你確認方向後，寫 PRD 到 `docs/prds/webhook.md`
+4. 你說「PRD OK」→ 開始實作
+
+**為什麼要先寫 PRD？**
+
+大型任務一定先寫 PRD 讓你確認，原因：
+- agent 實作過程不會問你問題（全自動），方向錯了跑完才知道
+- PRD 逼迫你在實作前把細節想清楚（API 格式、資料庫 schema、邊界條件）
+- PRD 是給 agent 的精確規格，減少 agent 自由發揮的空間
+
+**預期效果**：避免「agent 跑了 40 分鐘，但實作方向跟你想的不一樣」的浪費。
+
+---
+
+### 場景 4：平行處理多個獨立任務
+
+**情境**：你有多個互不依賴的任務要做
+
+**你說：**
+```
+我有三個獨立任務要做：
+1. 重構 auth 模組（PRD 在 docs/prds/auth.md）
+2. 加 export CSV 功能到 /api/reports
+3. 安全性掃描整個 API layer
+
+三個同時跑
+```
+
+**Claude 的做法：**
+- 同時派 3 個 agent（平行執行）
+- 分別等待各 agent 完成
+- 各自完成後獨立回報
+
+**預期效果**：3 個任務的總等待時間等於最慢那個 agent 的時間，而不是三個加總。如果每個各要 30 分鐘，你只需要等 30 分鐘，不是 90 分鐘。
+
+---
+
+### 場景 5：Code Review + 修正
+
+**情境**：實作完成後要做安全性和品質審查
+
+**你說：**
+```
+幫我 review 剛才 auth 重構的改動，特別注意安全性漏洞
+```
+
+**Claude 的做法：**
+1. 派多個 read-only review agent：
+   - 安全性 agent（OWASP Top 10）
+   - 錯誤處理 agent
+   - 資料完整性 agent
+2. 彙整結果，分類為 Critical / Important / Minor
+3. Critical 問題：自動再派 agent 修正
+4. 修正後，再派 verification agent 確認修正有效
+
+**你會收到類似：**
+```
+Review 結果：
+
+Critical（已自動修正）：
+- auth/session.ts:45 — expired token 未被拒絕，修正完成
+
+Important（建議處理）：
+- auth/jwt.ts:23 — secret 從 env 讀取但未驗證格式
+- middleware/auth.ts:67 — error message 洩漏太多實作細節
+
+Minor（記錄備用）：
+- 3 個檔案的 console.log 應改為 structured logging
+```
+
+**預期效果**：自動化安全審查，Critical 問題當場修正，不用等你手動改。
+
+---
+
+### 場景 6：多 Claude 視窗協作（大型專案）
+
+**情境**：要同時推進多個大型功能
+
+**做法：**
+開多個 Claude Code 視窗（同一個 terminal 不同 tab 或不同視窗），每個視窗各自負責一塊：
+
+```
+視窗 1：你：幫我做 user auth 系統重構
+視窗 2：你：幫我做 payment 模組的 v2 API
+視窗 3：你：幫我做整個前端的 dark mode
+視窗 4：你：幫我寫 e2e 測試套件
+```
+
+每個 Claude 各自指揮自己的 Codex agent，完全平行。
+
+**查看所有 agent 狀態：**
 ```bash
-# 有 PRD 時
-codex-agent start "Read docs/prds/p4-xxx.md and analyze what needs to change. List affected files and potential risks." --map -s read-only
-
-# 沒有 PRD，先調查
-codex-agent start "Investigate the current state of [模組]. What's implemented in P3? What's missing for P4?" --map -s read-only
+codex-agent jobs
 ```
 
-### Step 3：實作階段 — workspace-write agent
+所有視窗的 agent 都會出現，用 job ID 區分。
 
-```bash
-# 單一任務（exec 模式，自動完成）
-codex-agent start "Implement P4 Phase 1 per docs/prds/p4-xxx.md. Read the PRD first." --map
+**預期效果**：4 個大型任務平行進行，效率是循序做的 4 倍。
 
-# 需要多輪對話的複雜任務
-codex-agent start "Implement the new API endpoints for P4" --map --interactive
+---
 
-# 平行派多個 agent 處理不同模組
-codex-agent start "Implement P4 auth changes per PRD" --map -f "src/auth/**/*.ts"
-codex-agent start "Implement P4 database migrations per PRD" --map -f "src/db/**/*.ts"
-```
+## 工作流建議
 
-### Step 4：監控與追蹤
-
-```bash
-codex-agent jobs --json    # 結構化狀態（token、修改檔案、摘要）
-codex-agent capture <id>   # 看最近輸出
-codex-agent watch <id>     # 串流輸出
-```
-
-### Step 5：審查與測試
-
-```bash
-codex-agent start "Security review the P4 changes" --map -s read-only
-codex-agent start "Write tests for the P4 auth module and run them" --map
-```
-
-## 雙模式選擇
-
-codex-orchestrator 支援兩種執行模式：
-
-| 情境 | 模式 | 指令 |
-|------|------|------|
-| 明確的單一任務，不需中途追加 | **exec**（預設） | `codex-agent start "..." --map` |
-| 可能需要中途 send 追加 prompt | **interactive** | `codex-agent start "..." --map --interactive` |
-
-### Exec 模式（預設）
-
-- 使用 `codex exec`，完成後自動退出
-- 不支援 `send` 指令
-- 大部分情況用這個就好
-
-### Interactive 模式
-
-- 使用 Codex TUI，支援 `codex-agent send <id> "追加指令"`
-- Idle detection 30 秒後自動送 `/exit`
-- 適合探索性任務、需要多輪引導的工作
-- 用 `--interactive` flag 啟用
-
-```bash
-# 啟動 interactive agent
-codex-agent start "Analyze the codebase architecture" --map --interactive
-
-# 等 agent 完成第一輪後追加指令
-codex-agent send <id> "Now focus on the database layer"
-
-# 用 --keep-alive 停用 idle detection（持續對話）
-codex-agent start "Long exploration task" --map --interactive --keep-alive
-```
-
-## Sandbox 模式選擇
-
-| 模式 | 用途 | 指令 |
-|------|------|------|
-| `read-only` | 研究、調查、審查 | `-s read-only` |
-| `workspace-write`（預設） | 實作、測試 | 不加 flag |
-| `danger-full-access` | 需要系統層級操作 | `-s danger-full-access` |
-
-## 常用組合範例
-
-```bash
-# 研究任務（read-only + map）
-codex-agent start "Audit auth for OWASP vulnerabilities" --map -s read-only
-
-# 標準實作（workspace-write + map + PRD）
-codex-agent start "Implement feature per PRD" --map -f "docs/prds/feature.md"
-
-# 帶檔案 context 的實作
-codex-agent start "Refactor this module" --map -f "src/auth/**/*.ts" -f "src/types.ts"
-
-# 預覽 prompt（不執行）
-codex-agent start "Test prompt" --map -f "src/**/*.ts" --dry-run
-
-# 查看乾淨輸出（去除 ANSI codes）
-codex-agent capture <id> --strip-ansi
-codex-agent output <id> --strip-ansi
-```
-
-## 多 Claude 實例協作
-
-開多個 Claude Code 視窗，各自指揮 Codex 軍團：
+### 標準開發循環
 
 ```
-Claude #1: 負責 auth 模組重構（3 個 Codex agent）
-Claude #2: 負責 API endpoints 實作（2 個 Codex agent）
-Claude #3: 負責 security review（4 個 Codex agent）
-Claude #4: 負責寫測試（2 個 Codex agent）
+1. 早上：把今天要做的任務跟 Claude 說
+         ↓
+2. Claude 派 agent 開始跑
+         ↓
+3. 你去做別的事（開會、設計、寫文件）
+         ↓
+4. Agent 完成 → Claude 通知你
+         ↓
+5. 你確認結果 → 說下一步
+         ↓
+6. 重複
 ```
 
-所有實例共享 `agents.log`，透過 job ID 區分各自的 agent。
+### PRD 寫作建議
 
-## 故障排除
+對於 Important 以上的任務，先在 `docs/prds/` 建立 PRD：
 
-```bash
-# Agent 看起來卡住
-codex-agent capture <id> 100    # 查看最近輸出
-codex-agent send <id> "Status update - what's blocking you?"  # interactive only
+```markdown
+# 功能名稱
 
-# 檢查所有 job 狀態
-codex-agent jobs --json
+## 問題
+[什麼問題需要解決]
 
-# 真的卡住了（最後手段）
-codex-agent kill <id>
+## 解法
+[高層次的方案]
 
-# 清理舊 job（超過 7 天）
-codex-agent clean
+## 需求
+- [具體需求 1]
+- [具體需求 2]
+
+## 實作計畫
+### Phase 1：[名稱]
+- [ ] 任務 1
+- [ ] 任務 2
+
+## 要修改的檔案
+- src/auth/session.ts — [做什麼改動]
+
+## 驗收條件
+- [怎麼確認做完了]
 ```
+
+### 何時介入 agent
+
+| 情況 | 你要做什麼 |
+|------|----------|
+| Agent 完成，結果正確 | 說「繼續做 Phase 2」或「開始 review」 |
+| Agent 完成，方向有偏差 | 說明哪裡不對，請 Claude 重新派 agent |
+| Agent 跑超過預期時間 | 請 Claude 看 agent 最近輸出 |
+| Agent 真的卡住 | 請 Claude 砍掉再重派，這次提示更明確 |
+
+---
 
 ## Agent 耗時預期
 
-Codex agent 需要時間，這是正常的：
-
 | 任務類型 | 典型耗時 |
 |----------|----------|
-| 簡單研究 | 10-20 分鐘 |
-| 單一功能實作 | 20-40 分鐘 |
-| 複雜實作 | 30-60+ 分鐘 |
-| 完整 PRD 實作 | 45-90+ 分鐘 |
+| 簡單研究（找問題、列清單） | 5–15 分鐘 |
+| 單一功能實作 | 20–40 分鐘 |
+| 複雜實作（跨多模組） | 30–60 分鐘 |
+| 完整 PRD 實作 | 45–90+ 分鐘 |
 
-不要因為 agent 跑了 20 分鐘就 kill 它 — 它在深入閱讀和仔細實作。
+**Agent 慢 ≠ 卡住**。它在深入讀程式碼、思考邊界條件、實作後驗證。這個深度是它品質的來源。
+
+---
+
+## 常見問題
+
+**Q：沒有 Codebase Map 也能用嗎？**
+
+可以。沒有 map 的 agent 會自己探索架構，只是要多花 10-20 分鐘。建議還是先建 map。
+
+**Q：一次可以派幾個 agent？**
+
+理論上無上限。實際上受 OpenAI API rate limit 影響，同時跑 3-6 個是常見範圍。
+
+**Q：Agent 改壞了程式碼怎麼辦？**
+
+用 git 還原。所有 agent 的改動都在 git working tree，`git checkout .` 就能回到原點。這也是為什麼要「分 phase 實作」而不是一次做完——每個 phase 完成後確認沒問題再繼續。
+
+**Q：exec 和 interactive 模式差在哪？**
+
+| 模式 | 用途 | 使用時機 |
+|------|------|----------|
+| exec（預設）| 自動完成後退出 | 任務明確，不需要中途引導 |
+| interactive | 支援追加指令 | 探索性任務、需要多輪對話 |
+
+95% 的情況用 exec 就好。
+
+---
+
+## 三 Skill 組合 vs 單獨使用 Claude Opus 4.6
+
+### 工具角色
+
+| 工具 | 模型 | 角色 |
+|------|------|------|
+| Claude Code（你的對話）| Claude Opus 4.6 | 策略判斷、需求分析、拆解任務、彙整結果 |
+| `/cartographer` | Claude Opus 4.6（subagent）| 掃描 codebase，產出持久化架構地圖 |
+| `/codex-plan` | **Codex 5.3 xhigh** | 深讀程式碼後，從 coding 視角產出實作計畫 |
+| `/codex-orchestrator` | **Codex 5.3 xhigh**（複數 agent）| 平行執行：實作、測試、review |
+
+### 完整三 Skill 流水線
+
+```
+/cartographer            → docs/CODEBASE_MAP.md（架構地圖，持久化）
+      ↓
+/codex-plan              → Claude Opus 問需求 → 找相關檔案
+                           → Codex 5.3 xhigh 深讀 → codex-plan.md
+      ↓
+/codex-orchestrator      → Claude Opus 拿計畫派多個 Codex agent
+                           → 平行實作各 phase → 彙整回報
+```
+
+---
+
+### 比較分析
+
+#### 執行模型差異
+
+| | Claude Opus 4.6 單獨 | 三 Skill 組合 |
+|--|--|--|
+| **規劃者** | Opus 4.6（推理強，但 coding 不是專長） | Claude Opus 問需求 + **Codex 5.3 xhigh 深讀程式碼後規劃**（規劃者和執行者同模型） |
+| **執行者** | Opus 4.6 循序實作 | **Codex 5.3**（複數 agent，可平行） |
+| **平行能力** | 不行，循序 | 多 agent 平行，多視窗再乘上去 |
+| **架構記憶** | 對話 context 內（關掉就沒了） | 持久化 `docs/CODEBASE_MAP.md`（跨 session 有效） |
+| **每任務 context** | 共用同一個對話視窗，越做越擁擠 | 每個 agent 各自獨立 context，互不干擾 |
+| **計畫品質** | Opus 推理計畫（通用型） | Codex 5.3 讀完實際程式碼後的計畫（貼近程式碼） |
+
+---
+
+#### Claude Opus 4.6 單獨
+
+**優點**
+- 即時反應，30 秒內就能動手
+- 邊做邊討論，即時調整方向
+- 小任務成本低，不需要等 agent 啟動
+- Opus 4.6 推理能力強，複雜判斷交給它很合適
+
+**缺點**
+- 循序執行，一次只做一件事
+- 長對話後 context 越來越擁擠，影響判斷品質
+- 大型 codebase 讀不完，靠摘要可能漏掉細節
+- Opus 4.6 不是專門為 coding 優化，和 Codex 5.3 相比實作深度有差距
+
+---
+
+#### 三 Skill 組合（含 Opus 4.6 作為 orchestrator）
+
+**優點**
+- 平行執行：3 個任務各 30 分鐘 → 總等待時間 30 分鐘（不是 90）
+- Codex 5.3 xhigh 規劃：讀過真正的程式碼後才出計畫，比純推理更貼近實際
+- 架構地圖跨 session 持久，每次開新對話 agent 仍知道架構
+- 每個 agent 獨立 context，不受長對話影響
+- 超大型專案：多個 Claude Opus 視窗 × 多個 Codex agent = 大量平行
+
+**缺點**
+- 每個 agent 啟動有 10–40 分鐘開銷，小任務殺雞用牛刀
+- 執行中較難即時互動（exec 模式為主）
+- 活動件多（map、plan、agents），出錯時需要判斷是哪一層的問題
+- API 成本高於 Opus 4.6 單獨使用
+
+---
+
+#### 什麼時候用哪個？
+
+| 場景 | 建議 |
+|------|------|
+| 改 typo、調 config、解釋程式碼 | **Opus 4.6 單獨**，即時最快 |
+| 單一功能、多檔案、需求明確 | **codex-orchestrator**（不一定需要 codex-plan）|
+| 複雜功能、需要深入規劃、架構影響大 | **codex-plan → codex-orchestrator**（Codex 5.3 規劃+執行）|
+| 新專案第一次開工 | **cartographer → codex-plan → codex-orchestrator** 完整流水線 |
+| 多個互不依賴的任務 | **codex-orchestrator** 平行派發 |
+| 超大型系統重構 | 多個 Claude Opus 視窗各帶 codex-orchestrator 軍團 |
+
+---
+
+#### 一句話總結
+
+> **Opus 4.6 單獨**：適合小任務和即時討論，反應快，推理強。
+>
+> **三 Skill 組合**：適合中大型任務，Codex 5.3 規劃+執行比 Opus 4.6 直接做更深，平行能力讓時間成本大幅壓縮。
+>
+> 兩者不互斥 — Opus 4.6 是 orchestrator，Codex 5.3 是執行軍團。
+
+---
+
+## 注意事項
+
+- **分 phase 實作**：大型任務拆 phase，每個 phase 確認無誤再繼續，不要一次派 agent 做全部
+- **不要在 agent 跑中間改相同的檔案**：會造成衝突
+- **PRD 是合約**：agent 會嚴格照 PRD 做，PRD 寫得清楚，agent 就做得準
+- **中途 kill 是最後手段**：除非 agent 真的跑錯方向，否則讓它跑完
