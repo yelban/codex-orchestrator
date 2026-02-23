@@ -369,7 +369,7 @@ The CLI ships with strong defaults so most commands need minimal flags:
 
 | Setting | Default | Why |
 |---------|---------|-----|
-| Model | `gpt-5.3-codex-spark` | Latest and most capable Codex model |
+| Model | `gpt-5.3-codex` | Latest and most capable Codex model |
 | Reasoning | `xhigh` | Maximum reasoning depth - agents think deeply |
 | Sandbox | `workspace-write` | Agents can modify files by default |
 
