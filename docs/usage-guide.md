@@ -485,6 +485,55 @@ codex-agent jobs
 
 ---
 
+## Plugin 更新流程
+
+當 `yelban/codex-orchestrator` 有新 commit 推送後，需手動同步三個位置：
+
+### 1. Marketplace Clone（git pull）
+
+```bash
+git -C ~/.claude/plugins/marketplaces/codex-orchestrator-marketplace pull
+```
+
+若出現本地修改衝突（例如之前直接複製 SKILL.md 造成的 dirty state）：
+
+```bash
+# 捨棄本地修改再 pull（遠端已包含相同修正）
+git -C ~/.claude/plugins/marketplaces/codex-orchestrator-marketplace \
+  checkout -- plugins/codex-orchestrator/skills/codex-orchestrator/SKILL.md
+git -C ~/.claude/plugins/marketplaces/codex-orchestrator-marketplace pull
+```
+
+### 2. Plugin Cache（手動複製 SKILL.md）
+
+Plugin cache 不是 git clone，需手動複製：
+
+```bash
+cp ~/.claude/plugins/marketplaces/codex-orchestrator-marketplace/plugins/codex-orchestrator/skills/codex-orchestrator/SKILL.md \
+   ~/.claude/plugins/cache/codex-orchestrator-marketplace/codex-orchestrator/1.0.0/skills/codex-orchestrator/SKILL.md
+```
+
+### 3. 驗證同步
+
+```bash
+diff \
+  ~/.claude/plugins/marketplaces/codex-orchestrator-marketplace/plugins/codex-orchestrator/skills/codex-orchestrator/SKILL.md \
+  ~/.claude/plugins/cache/codex-orchestrator-marketplace/codex-orchestrator/1.0.0/skills/codex-orchestrator/SKILL.md \
+  && echo "IDENTICAL"
+```
+
+### 為什麼有三個位置？
+
+| 位置 | 說明 |
+|------|------|
+| `~/zoo/codex-orchestrator/`（或任何開發目錄）| 原始碼，git push 的來源 |
+| `~/.claude/plugins/marketplaces/codex-orchestrator-marketplace/` | Claude Code 的 marketplace clone，git pull 可同步 |
+| `~/.claude/plugins/cache/codex-orchestrator-marketplace/` | Claude Code 實際讀取的 plugin cache，需手動複製 |
+
+Claude Code 啟動時讀取 **plugin cache** 的 SKILL.md，所以光是 git pull marketplace clone 還不夠，cache 也要手動同步。
+
+---
+
 ## 注意事項
 
 - **分 phase 實作**：大型任務拆 phase，每個 phase 確認無誤再繼續，不要一次派 agent 做全部
