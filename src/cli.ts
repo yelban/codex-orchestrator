@@ -52,7 +52,7 @@ Usage:
 
 Options:
   --provider <name>          Provider: openai, gemini (default: openai)
-  -r, --reasoning <level>    Reasoning effort: low, medium, high, xhigh (default: xhigh)
+  -r, --reasoning <level>    Reasoning effort: low, medium, high, xhigh (default: high)
   -m, --model <model>        Model name (default: gpt-5.4)
   --fast                     Use fast model (gpt-5.4-spark)
   -s, --sandbox <mode>       Sandbox: read-only, workspace-write, danger-full-access

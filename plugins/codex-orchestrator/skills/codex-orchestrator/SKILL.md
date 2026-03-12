@@ -300,8 +300,8 @@ Verification:
 | Task type | Effort | Flag |
 |---|---|---|
 | Simple code generation, formatting | `medium` | `-r medium` |
-| Standard implementation from clear specs | `high` | `-r high` |
-| Complex refactors, architecture, plan review | `xhigh` | default, no flag needed |
+| Standard implementation from clear specs | `high` | default, no flag needed |
+| Complex refactors, architecture, plan review | `xhigh` | `-r xhigh` |
 
 ## Exec vs Interactive Mode
 
@@ -383,8 +383,8 @@ The CLI ships with strong defaults so most commands need minimal flags:
 
 | Setting | Default | Why |
 |---------|---------|-----|
-| Model | `gpt-5.4` | Full capability model with xhigh reasoning (use `--fast` for spark) |
-| Reasoning | `xhigh` | Maximum reasoning depth - agents think deeply |
+| Model | `gpt-5.4` | Full capability model with high reasoning (use `--fast` for spark) |
+| Reasoning | `high` | Deep reasoning depth - balances quality and speed |
 | Sandbox | `workspace-write` | Agents can modify files by default |
 
 You almost never need to override these. The main flags you'll use are `--map` (include codebase context), `-s read-only` (for research tasks), and `-f` (include specific files).
@@ -515,7 +515,7 @@ codex-bg -t -- codex-agent start "task"
 # Research (read-only - override sandbox)
 codex-agent start "Investigate auth flow for vulnerabilities" --map -s read-only
 
-# Implementation (defaults are perfect - xhigh reasoning, workspace-write)
+# Implementation (defaults are perfect - high reasoning, workspace-write)
 codex-agent start "Implement the auth refactor per PRD" --map
 
 # With file context
