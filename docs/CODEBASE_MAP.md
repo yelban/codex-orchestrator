@@ -171,7 +171,7 @@ codex-orchestrator/
 
 | Key | Default | Env Override |
 |-----|---------|-------------|
-| model | `gpt-5.3-codex` | — |
+| model | `gpt-5.4` | — |
 | defaultReasoningEffort | `xhigh` | — |
 | defaultSandbox | `workspace-write` | — |
 | defaultTimeout | 60 min | — |

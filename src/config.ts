@@ -7,8 +7,9 @@ export type ExecRunner = "tmux" | "spawn";
 export type Provider = "openai" | "gemini";
 
 export const config = {
-  // Default model
-  model: "gpt-5.3-codex",
+  // Default model (use --fast for spark)
+  model: "gpt-5.4",
+  fastModel: "gpt-5.4-spark",
 
   // Reasoning effort levels
   reasoningEfforts: ["low", "medium", "high", "xhigh"] as const,

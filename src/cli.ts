@@ -53,7 +53,8 @@ Usage:
 Options:
   --provider <name>          Provider: openai, gemini (default: openai)
   -r, --reasoning <level>    Reasoning effort: low, medium, high, xhigh (default: xhigh)
-  -m, --model <model>        Model name (default: gpt-5.3-codex)
+  -m, --model <model>        Model name (default: gpt-5.4)
+  --fast                     Use fast model (gpt-5.4-spark)
   -s, --sandbox <mode>       Sandbox: read-only, workspace-write, danger-full-access
   -w, --wait                 Wait for completion before exiting
   --notify-on-complete <cmd>  Run command when job completes
@@ -173,6 +174,9 @@ function parseArgs(args: string[]): {
       }
     } else if (arg === "-m" || arg === "--model") {
       options.model = args[++i];
+      modelExplicit = true;
+    } else if (arg === "--fast") {
+      options.model = config.fastModel;
       modelExplicit = true;
     } else if (arg === "-s" || arg === "--sandbox") {
       const mode = args[++i] as SandboxMode;
