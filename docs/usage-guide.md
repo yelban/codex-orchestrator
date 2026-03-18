@@ -52,6 +52,29 @@ codex-agent health
 
 **初始化只需要做一次**。之後每次開 Claude Code 都直接可用。
 
+### macOS Sandbox 設定（必要）
+
+如果 Claude Code 啟用了 sandbox，**必須**在 `~/.claude/settings.json` 中設定：
+
+```json
+"sandbox": {
+  "excludedCommands": ["codex", "codex-agent"],
+  "network": {
+    "allowAllUnixSockets": true,
+    "allowedDomains": ["api.openai.com"]
+  },
+  "filesystem": {
+    "allowWrite": ["~/.codex-agent"]
+  }
+}
+```
+
+**`network.allowAllUnixSockets: true` 是強制需求**。Codex CLI (Rust) 在 macOS 上初始化
+HTTP client 時需透過 Unix socket 連接 `configd` 讀取 DNS 設定。若為 `false`，
+codex 會直接 panic。修改後需重啟 Claude Code session。
+
+詳見 [troubleshooting-macos-sandbox-panic.md](troubleshooting-macos-sandbox-panic.md)。
+
 ---
 
 ## 新專案啟動（每個新專案第一次）

@@ -67,6 +67,20 @@ For ANY task involving:
 
 **Spawn Codex agents. Do not do it yourself. Do not use Claude subagents.**
 
+### Rule 1.5: macOS Sandbox Compatibility
+
+On macOS, Codex CLI (Rust binary) requires Unix socket access to `configd` for DNS resolution. If Claude Code's sandbox blocks this, `codex exec` will panic with `system-configuration` crate error.
+
+**Always run `codex-agent` Bash calls with `dangerouslyDisableSandbox: true`** to prevent this crash. This is safe because codex-agent manages its own sandbox via `-s` flag.
+
+```
+// CORRECT - always use dangerouslyDisableSandbox for codex-agent
+Bash(codex-agent start "..." --map, dangerouslyDisableSandbox: true)
+Bash(codex-agent await-turn <id>, dangerouslyDisableSandbox: true)
+Bash(codex-agent status <id>, dangerouslyDisableSandbox: true)
+Bash(codex-agent capture <id>, dangerouslyDisableSandbox: true)
+```
+
 ### Rule 2: You Are the Orchestrator, Not the Implementer
 
 Your job:
