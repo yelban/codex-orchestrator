@@ -169,12 +169,12 @@ Attempted to create a NULL object.
 
 ```bash
 # codex 在 excludedCommands 裡，sandbox 內仍然 panic
-echo "hello" | codex exec -m gpt-5.4 -s read-only --json -
+echo "hello" | codex exec -m gpt-5.5 -s read-only --json -
 # → panic at dynamic_store.rs:154
 
 # 關閉 sandbox 後正常
 # (dangerouslyDisableSandbox: true)
-echo "hello" | codex exec -m gpt-5.4 -s read-only --json -
+echo "hello" | codex exec -m gpt-5.5 -s read-only --json -
 # → {"type":"thread.started",...} ✅
 ```
 
@@ -750,7 +750,7 @@ Codex Orchestrator 使用者額外驗證：
 
 ```bash
 # 確認 codex exec 不再 panic
-echo "echo hello" | codex exec -m gpt-5.4 -s read-only --json -
+echo "echo hello" | codex exec -m gpt-5.5 -s read-only --json -
 # 預期：正常輸出 JSON
 
 # 確認 codex-agent 可正常運作

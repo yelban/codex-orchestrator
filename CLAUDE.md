@@ -134,8 +134,8 @@ plugins/codex-orchestrator/
 
 | Key | Value |
 |-----|-------|
-| model | `gpt-5.4` |
-| defaultReasoningEffort | `xhigh` |
+| model | `gpt-5.5` |
+| defaultReasoningEffort | `high` |
 | defaultSandbox | `workspace-write` |
 | defaultTimeout | 60 minutes |
 | interactiveTimeout | 120 minutes |

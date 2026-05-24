@@ -146,7 +146,7 @@ codex-agent send <jobId> "Focus on the authentication module instead"
 | Option | Description |
 |--------|-------------|
 | `-r, --reasoning <level>` | Reasoning effort: `low`, `medium`, `high`, `xhigh` |
-| `-m, --model <model>` | Model name (default: gpt-5.4) |
+| `-m, --model <model>` | Model name (default: gpt-5.5) |
 | `-w, --wait` | Wait for completion and emit a ping when done |
 | `--notify-on-complete <cmd>` | Shell command to run when the job completes |
 | `-s, --sandbox <mode>` | `read-only`, `workspace-write`, `danger-full-access` |

@@ -383,7 +383,7 @@ The CLI ships with strong defaults so most commands need minimal flags:
 
 | Setting | Default | Why |
 |---------|---------|-----|
-| Model | `gpt-5.4` | Full capability model with high reasoning (use `--fast` for spark) |
+| Model | `gpt-5.5` | Full capability model with high reasoning (current Codex CLI recommended default) |
 | Reasoning | `high` | Deep reasoning depth - balances quality and speed |
 | Sandbox | `workspace-write` | Agents can modify files by default |
 
