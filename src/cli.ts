@@ -456,15 +456,7 @@ async function main() {
   try {
     switch (command) {
       case "health": {
-        // Check tmux
-        if (!isTmuxAvailable()) {
-          console.error("tmux not found");
-          console.error("Install with: brew install tmux");
-          process.exit(1);
-        }
-        console.log("tmux: OK");
-
-        // Check codex
+        // codex is required for every runner — hard check.
         const { execSync } = await import("child_process");
         try {
           const version = execSync("codex --version", { encoding: "utf-8" }).trim();
@@ -475,6 +467,20 @@ async function main() {
           process.exit(1);
         }
 
+        // tmux is only required for interactive or the legacy tmux exec runner.
+        const tmuxRequired = config.execRunner === "tmux";
+        if (isTmuxAvailable()) {
+          console.log("tmux: OK");
+        } else if (tmuxRequired) {
+          console.error("tmux not found (required because CODEX_AGENT_EXEC_RUNNER=tmux)");
+          console.error("Install with: brew install tmux");
+          process.exit(1);
+        } else {
+          console.warn("tmux: not installed (only needed for --interactive jobs or CODEX_AGENT_EXEC_RUNNER=tmux)");
+        }
+
+        console.log(`runner: ${config.execRunner}`);
+        console.log(`provider: ${config.provider}`);
         console.log("Status: Ready");
         break;
       }
