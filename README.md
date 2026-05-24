@@ -8,6 +8,43 @@ Delegate tasks to OpenAI Codex agents. Exec mode uses detached processes (no tmu
 
 Spawn parallel coding agents, monitor their progress, and capture results — all from Claude Code or the command line. Supports two execution modes: **exec** (default, spawn runner, auto-completes) and **interactive** (tmux TUI with send support and idle detection). Job metadata stored in SQLite (WAL mode) with JSON fallback.
 
+> **Workflow / Ultrawork ready** — drive `codex-agent` from inside a Claude Code Workflow script (`agent()` / `parallel()` / `pipeline()`) under the `ultrawork` opt-in, getting sandbox isolation, progress tracking, and multi-provider routing for free. See [§ Workflow / Ultrawork Integration](#workflow--ultrawork-integration).
+
+## Workflow / Ultrawork Integration
+
+Claude Code's Workflow tool spawns Claude subagents that have Bash access. Inside any Workflow `agent()` call, the subagent can run `codex-agent` to delegate coding tasks — instead of writing the implementation inline. The intermediate Claude layer handles prompt shaping, provider routing, and output parsing; `codex-agent` does the heavy lifting.
+
+**Activation** — include `ultrawork` in your user message (or invoke a Workflow-using skill). The Claude Code harness then authorizes the Workflow tool. No installation needed beyond the prerequisites below.
+
+**Prerequisites**
+
+- `.claude/settings.json` Bash whitelist needs `Bash(codex-agent:*)` (one wildcard covers all subcommands)
+- Use **exec mode** (default) — never `--interactive` from a Workflow (no human at the keyboard)
+- Gemini jobs have `null` for `tokens` / `files_modified` / `summary` — handle in your output parser
+
+**Two canonical idioms**
+
+Single blocking task (subagent waits inline, simplest):
+
+```bash
+codex-agent start "<task>" --wait
+codex-agent output <id>
+```
+
+Background fan-out (>5 parallel tasks — avoids blocking subagent processes):
+
+```bash
+id1=$(codex-agent start "Analyze auth module")
+id2=$(codex-agent start "Audit error handling")
+id3=$(codex-agent start --provider gemini "Cross-check findings")
+
+codex-agent await-turn $id1 && codex-agent output $id1
+codex-agent await-turn $id2 && codex-agent output $id2
+codex-agent await-turn $id3 && codex-agent output $id3
+```
+
+For deeper orchestration patterns, conditional routing, and gotchas: see [`CLAUDE.md` → Workflow / Ultrawork Integration](CLAUDE.md#workflow--ultrawork-integration).
+
 ## Installation
 
 ### As a Claude Code Plugin (Recommended)
