@@ -636,12 +636,15 @@ function refreshTmuxJob(job: Job): void {
     job.resultPreview = output.slice(-500);
     saveJob(job);
   } else if (job.interactive && config.idleDetectionEnabled && !job.exitSent && !job.keepAlive) {
-    // Idle detection for interactive jobs only
-    const idle = isCodexIdle(job.tmuxSession);
+    // Idle detection. Prefer the notify-hook turn-complete signal (authoritative,
+    // emitted by codex itself when a turn finishes). Fall back to the TUI pane
+    // string match for jobs that started without a hook configured.
+    const signal = readSignalFile(job.id);
+    const idleAt = signal?.timestamp ?? (isCodexIdle(job.tmuxSession) ? new Date().toISOString() : null);
 
-    if (idle) {
+    if (idleAt) {
       if (!job.idleDetectedAt) {
-        job.idleDetectedAt = new Date().toISOString();
+        job.idleDetectedAt = idleAt;
         saveJob(job);
       } else {
         const idleSinceMs = Date.now() - Date.parse(job.idleDetectedAt);
