@@ -20,6 +20,7 @@ import {
   isCodexIdle,
 } from "./tmux.ts";
 import { spawnExecJob, isProcessAlive, readExitCode } from "./spawn-runner.ts";
+import { ensureTrustedProject } from "./codex-trust.ts";
 import { clearSignalFile, signalFileExists, readSignalFile, type TurnEvent } from "./watcher.ts";
 
 export interface Job {
@@ -297,6 +298,17 @@ export function startJob(options: StartJobOptions): Job {
   };
 
   saveJob(job);
+
+  // Pre-onboard the project to codex's trust list so the "Do you trust this
+  // directory?" dialog doesn't swallow our initial prompt on first run.
+  // Skipped for gemini (provider has no equivalent dialog).
+  if (provider !== "gemini") {
+    try {
+      ensureTrustedProject(cwd);
+    } catch {
+      // Non-fatal — codex will just show the trust dialog on first run.
+    }
+  }
 
   if (useSpawn) {
     // Spawn-based exec: detached child process, no tmux
