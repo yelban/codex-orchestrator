@@ -502,7 +502,9 @@ export function isJobRunning(jobId: string): boolean {
   return false;
 }
 
-const PENDING_TIMEOUT_MS = 5 * 60 * 1000;
+function pendingTimeoutMs(): number {
+  return config.pendingJobTimeoutMinutes * 60 * 1000;
+}
 
 export function refreshJobStatus(jobId: string): Job | null {
   const job = loadJob(jobId);
@@ -512,14 +514,14 @@ export function refreshJobStatus(jobId: string): Job | null {
 
   // Route by runner type. Both spawn and tmux helpers promote pending → running
   // when they detect the process/session is alive, and mark stale pending jobs
-  // failed if the runner never came up within PENDING_TIMEOUT_MS.
+  // failed if the runner never came up within config.pendingJobTimeoutMinutes.
   if (job.runner === "spawn" && job.pid) {
     refreshSpawnJob(job);
   } else if (job.tmuxSession) {
     refreshTmuxJob(job);
   } else if (job.status === "pending") {
     const ageMs = Date.now() - Date.parse(job.createdAt);
-    if (ageMs > PENDING_TIMEOUT_MS) {
+    if (ageMs > pendingTimeoutMs()) {
       job.status = "failed";
       job.error = "Pending job had no runner attached";
       job.completedAt = new Date().toISOString();
@@ -595,7 +597,7 @@ function refreshTmuxJob(job: Job): void {
     if (job.status === "pending") {
       // Session never started. Wait until age exceeds timeout before failing.
       const ageMs = Date.now() - Date.parse(job.createdAt);
-      if (ageMs > PENDING_TIMEOUT_MS) {
+      if (ageMs > pendingTimeoutMs()) {
         job.status = "failed";
         job.error = "tmux session never started";
         job.completedAt = new Date().toISOString();

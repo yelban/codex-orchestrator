@@ -37,6 +37,9 @@ export const config = {
   idleDetectionEnabled: true,
   idleGracePeriodSeconds: 30,
 
+  // How long a pending job may stay pending before refreshJobStatus marks it failed.
+  pendingJobTimeoutMinutes: 5,
+
   // Storage (dual = write both JSON+SQLite, read SQLite first)
   storageMode: (process.env.CODEX_AGENT_STORAGE || "dual") as StorageMode,
   sqliteDbPath: `${process.env.HOME}/.codex-agent/codex-agent.db`,
