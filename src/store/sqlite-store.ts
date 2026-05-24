@@ -7,7 +7,7 @@ import type { Job } from "../jobs.ts";
 import type { Provider } from "../config.ts";
 import type { JobStore } from "./job-store.ts";
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 const CREATE_TABLES = `
 CREATE TABLE IF NOT EXISTS jobs (
@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   last_turn_completed_at TEXT,
   last_agent_message TEXT,
   turn_state TEXT,
+  last_observed_turn_id TEXT,
   enrichment_json TEXT,
   updated_at TEXT NOT NULL
 );
@@ -74,6 +75,7 @@ type JobRow = {
   last_turn_completed_at: string | null;
   last_agent_message: string | null;
   turn_state: string | null;
+  last_observed_turn_id: string | null;
   enrichment_json: string | null;
   updated_at: string;
 };
@@ -106,6 +108,7 @@ function jobToRow(job: Job): JobRow {
     last_turn_completed_at: job.lastTurnCompletedAt ?? null,
     last_agent_message: job.lastAgentMessage ?? null,
     turn_state: job.turnState ?? null,
+    last_observed_turn_id: job.lastObservedTurnId ?? null,
     enrichment_json: job.enrichment ? JSON.stringify(job.enrichment) : null,
     updated_at: new Date().toISOString(),
   };
@@ -148,6 +151,7 @@ function rowToJob(row: JobRow): Job {
     lastTurnCompletedAt: row.last_turn_completed_at ?? undefined,
     lastAgentMessage: row.last_agent_message ?? undefined,
     turnState: (row.turn_state as Job["turnState"]) ?? undefined,
+    lastObservedTurnId: row.last_observed_turn_id ?? undefined,
     enrichment,
   };
 }
@@ -195,6 +199,17 @@ export class SqliteStore implements JobStore {
         this.db.exec("ALTER TABLE jobs ADD COLUMN provider TEXT NOT NULL DEFAULT 'openai'");
       }
     }
+    if (fromVersion < 4) {
+      const cols = this.db.prepare("PRAGMA table_info(jobs)").all() as { name: string }[];
+      const existing = new Set(cols.map((c) => c.name));
+      if (!existing.has("last_observed_turn_id")) {
+        try {
+          this.db.exec("ALTER TABLE jobs ADD COLUMN last_observed_turn_id TEXT");
+        } catch (err) {
+          console.warn(`[codex-agent] schema migration v4 ALTER failed (continuing): ${(err as Error).message}`);
+        }
+      }
+    }
   }
 
   /** Build $-prefixed params object from a JobRow for binding. */
@@ -215,7 +230,8 @@ export class SqliteStore implements JobStore {
       "tmux_session", "pid", "exit_code", "runner", "provider",
       "result_preview", "error", "interactive", "keep_alive",
       "idle_detected_at", "exit_sent", "turn_count", "last_turn_completed_at",
-      "last_agent_message", "turn_state", "enrichment_json", "updated_at",
+      "last_agent_message", "turn_state", "last_observed_turn_id",
+      "enrichment_json", "updated_at",
     ];
   }
 

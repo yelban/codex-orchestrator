@@ -21,7 +21,13 @@ import {
 } from "./tmux.ts";
 import { spawnExecJob, isProcessAlive, readExitCode } from "./spawn-runner.ts";
 import { ensureTrustedProject } from "./codex-trust.ts";
-import { clearSignalFile, signalFileExists, readSignalFile, type TurnEvent } from "./watcher.ts";
+import {
+  clearSignalFile,
+  signalFileExists,
+  readSignalFile,
+  countTurnLogLines,
+  type TurnEvent,
+} from "./watcher.ts";
 
 export interface Job {
   id: string;
@@ -52,6 +58,7 @@ export interface Job {
   lastTurnCompletedAt?: string;
   lastAgentMessage?: string;
   turnState?: "working" | "idle" | "context_limit";
+  lastObservedTurnId?: string;  // most recently applied signal.turnId — idempotency guard
   // Cached enrichment data (written once after completion)
   enrichment?: {
     tokens: ParsedSessionData["tokens"];
@@ -506,6 +513,35 @@ function pendingTimeoutMs(): number {
   return config.pendingJobTimeoutMinutes * 60 * 1000;
 }
 
+function truncateText(text: string, max: number): string {
+  return text.length <= max ? text : text.slice(0, max);
+}
+
+/**
+ * Merge the latest notify-hook turn signal into the in-memory job. Caller is
+ * responsible for persisting (saveJob) when this returns true.
+ * Idempotent via lastObservedTurnId — re-running with the same signal is a no-op.
+ *
+ * This is the CLI-side replacement for the old watcher.updateJobTurn which
+ * ran inside the notify-hook subprocess and raced with refreshJobStatus' own
+ * saveJob. Making the CLI process the sole writer of job state eliminates
+ * the race.
+ */
+export function applyTurnSignal(job: Job): boolean {
+  const signal = readSignalFile(job.id);
+  if (!signal) return false;
+  if (signal.turnId && signal.turnId === job.lastObservedTurnId) return false;
+
+  job.lastTurnCompletedAt = signal.timestamp;
+  job.lastAgentMessage = signal.lastAgentMessage
+    ? truncateText(signal.lastAgentMessage, 500)
+    : undefined;
+  job.turnState = "idle";
+  job.lastObservedTurnId = signal.turnId || undefined;
+  job.turnCount = countTurnLogLines(job.id);
+  return true;
+}
+
 export function refreshJobStatus(jobId: string): Job | null {
   const job = loadJob(jobId);
   if (!job) return null;
@@ -592,6 +628,14 @@ function refreshSpawnJob(job: Job): void {
 /** Refresh status for tmux-based jobs (both exec and interactive). */
 function refreshTmuxJob(job: Job): void {
   if (!job.tmuxSession) return;
+
+  // Pull latest notify-hook turn data into the job before any other mutation,
+  // so downstream saveJob calls don't overwrite turn fields with stale values.
+  // If the signal changed anything, persist immediately too — the downstream
+  // branches save only on status transitions, not on turn updates alone.
+  if (applyTurnSignal(job)) {
+    saveJob(job);
+  }
 
   if (!sessionExists(job.tmuxSession)) {
     if (job.status === "pending") {

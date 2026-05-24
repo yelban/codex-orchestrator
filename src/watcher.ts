@@ -1,4 +1,4 @@
-import { readFileSync, unlinkSync, statSync } from "fs";
+import { appendFileSync, readFileSync, unlinkSync, statSync } from "fs";
 import { join } from "path";
 import { config } from "./config.ts";
 import { atomicWriteFileSync } from "./fs-utils.ts";
@@ -11,6 +11,10 @@ export interface TurnEvent {
 
 function getSignalPath(jobId: string): string {
   return join(config.jobsDir, `${jobId}.turn-complete`);
+}
+
+function getTurnLogPath(jobId: string): string {
+  return join(config.jobsDir, `${jobId}.turn-log.jsonl`);
 }
 
 export function writeSignalFile(jobId: string, event: TurnEvent): void {
@@ -43,34 +47,21 @@ export function signalFileExists(jobId: string): boolean {
   }
 }
 
-function truncateText(text: string, max: number): string {
-  if (text.length <= max) return text;
-  return text.slice(0, max);
+/**
+ * Append a turn event to the per-job JSONL log. POSIX guarantees atomic
+ * writes < PIPE_BUF for `O_APPEND`; each event is one short JSON line so
+ * concurrent appends from notify-hook subprocesses are safe.
+ */
+export function appendTurnLog(jobId: string, event: TurnEvent): void {
+  appendFileSync(getTurnLogPath(jobId), JSON.stringify(event) + "\n", { mode: 0o600 });
 }
 
-export function updateJobTurn(jobId: string, event: TurnEvent): void {
-  const jobPath = join(config.jobsDir, `${jobId}.json`);
+export function countTurnLogLines(jobId: string): number {
   try {
-    const job = JSON.parse(readFileSync(jobPath, "utf-8"));
-    job.turnCount = (job.turnCount || 0) + 1;
-    job.lastTurnCompletedAt = event.timestamp;
-    job.lastAgentMessage = event.lastAgentMessage
-      ? truncateText(event.lastAgentMessage, 500)
-      : null;
-    job.turnState = "idle";
-    atomicWriteFileSync(jobPath, JSON.stringify(job, null, 2));
+    const content = readFileSync(getTurnLogPath(jobId), "utf-8");
+    if (!content) return 0;
+    return content.split("\n").filter((line) => line.length > 0).length;
   } catch {
-    // Job file may not exist or be corrupt - skip silently
-  }
-}
-
-export function setJobTurnWorking(jobId: string): void {
-  const jobPath = join(config.jobsDir, `${jobId}.json`);
-  try {
-    const job = JSON.parse(readFileSync(jobPath, "utf-8"));
-    job.turnState = "working";
-    atomicWriteFileSync(jobPath, JSON.stringify(job, null, 2));
-  } catch {
-    // Skip silently
+    return 0;
   }
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { updateJobTurn, writeSignalFile, type TurnEvent } from "./watcher.ts";
+import { appendTurnLog, writeSignalFile, type TurnEvent } from "./watcher.ts";
 
 type NotifyPayload = {
   type?: string;
@@ -37,8 +37,13 @@ function main(): void {
     timestamp: new Date().toISOString(),
   };
 
+  // Notify-hook is intentionally fire-and-forget toward job.json — only the
+  // CLI process writes there, to avoid the read-modify-write race that the
+  // previous updateJobTurn call introduced. The signal file gives await-turn
+  // the latest event; the JSONL log gives the CLI an exact turn count on
+  // next refresh.
   writeSignalFile(jobId, event);
-  updateJobTurn(jobId, event);
+  appendTurnLog(jobId, event);
 }
 
 main();
