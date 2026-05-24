@@ -109,6 +109,7 @@ function buildExecLauncher(opts: {
 
 function buildInteractiveLauncher(opts: {
   logFile: string;
+  promptFile: string;
   model: string;
   reasoningEffort: string;
   sandbox: string;
@@ -118,7 +119,9 @@ function buildInteractiveLauncher(opts: {
   const q = shellQuote;
   const notifyValue = `notify=["bun","run","${opts.notifyHook}","${opts.jobId}"]`;
 
-  // Build the codex command parts (each properly quoted for bash)
+  // Pass the prompt as a CLI positional arg via $(cat promptFile) so codex
+  // receives it at launch — eliminates the fragile post-init send-keys path
+  // that was getting swallowed by the TUI ("100% left" stuck state).
   const codexCmd = [
     "codex",
     "-c", q(`model=${opts.model}`),
@@ -127,6 +130,7 @@ function buildInteractiveLauncher(opts: {
     "-c", q(notifyValue),
     "-a", "never",
     "-s", q(opts.sandbox),
+    `"$(cat ${q(opts.promptFile)})"`,
   ].join(" ");
 
   const lines = ["#!/bin/bash", "set -euo pipefail", ""];
@@ -177,6 +181,7 @@ export function createSession(options: {
   if (options.interactive) {
     launcher = buildInteractiveLauncher({
       logFile,
+      promptFile,
       model: options.model,
       reasoningEffort: options.reasoningEffort,
       sandbox: options.sandbox,
@@ -208,13 +213,8 @@ export function createSession(options: {
       return { sessionName, success: false, error: `tmux new-session failed: ${stderr}` };
     }
 
-    if (options.interactive) {
-      // Wait for TUI to initialize, then send the initial prompt
-      // skip_update_check=true eliminates the need to send "3" to dismiss update prompt
-      spawnSync("sleep", ["1"]);
-      sendPromptToSession(sessionName, options.prompt, promptFile);
-    }
-
+    // Interactive prompt is embedded in the launcher script via $(cat promptFile);
+    // codex receives it at launch. Multi-turn follow-ups use sendMessage().
     return { sessionName, success: true };
   } catch (err) {
     return {
@@ -223,32 +223,6 @@ export function createSession(options: {
       error: (err as Error).message,
     };
   }
-}
-
-/**
- * Send the initial prompt to an interactive codex session.
- * Uses tmux send-keys -l (literal) for short prompts,
- * load-buffer + paste-buffer for long ones.
- */
-function sendPromptToSession(
-  sessionName: string,
-  prompt: string,
-  promptFile: string
-): void {
-  if (prompt.length < 5000) {
-    // send-keys -l sends literal text (no key name interpretation)
-    spawnSync("tmux", ["send-keys", "-t", sessionName, "-l", prompt], {
-      stdio: "pipe",
-    });
-  } else {
-    // For long prompts, use load-buffer from the prompt file
-    spawnSync("tmux", ["load-buffer", promptFile], { stdio: "pipe" });
-    spawnSync("tmux", ["paste-buffer", "-t", sessionName], { stdio: "pipe" });
-  }
-  spawnSync("sleep", ["0.3"]);
-  spawnSync("tmux", ["send-keys", "-t", sessionName, "Enter"], {
-    stdio: "pipe",
-  });
 }
 
 // ---------- idle detection ----------
