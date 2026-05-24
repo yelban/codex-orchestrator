@@ -379,6 +379,8 @@ export function killJob(jobId: string): boolean {
   job.status = "failed";
   job.error = "Killed by user";
   job.completedAt = new Date().toISOString();
+  job.turnState = undefined;
+  job.idleDetectedAt = undefined;
   saveJob(job);
   return true;
 }
