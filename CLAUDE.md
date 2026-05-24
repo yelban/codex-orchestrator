@@ -87,9 +87,9 @@ bin/codex-agent (shell wrapper)
 
 **Data flow (exec mode, default — spawn runner)**: `start` writes prompt to `.prompt` file → generates provider-specific launcher `.sh` script (OpenAI or Gemini) → spawns detached `bash <launcher>` via `child_process.spawn` → launcher pipes prompt to `codex exec` or `gemini` via `tee` → provider auto-completes → exit code written to `.exitcode` file via `PIPESTATUS[0]` → `refreshJobStatus` checks PID liveness + exit code for accurate completion/failure detection.
 
-**Data flow (exec mode — tmux runner fallback)**: Same as above but runs inside a detached tmux session. Set `CODEX_AGENT_EXEC_RUNNER=tmux` to use. Marker string `[codex-agent: Session complete` used for completion detection.
+**Data flow (exec mode — tmux runner fallback, `@deprecated`)**: Same as above but runs inside a detached tmux session. Set `CODEX_AGENT_EXEC_RUNNER=tmux` to use. Marker string `[codex-agent: Session complete` captured via `(codex exec ... ; printf marker) | tee log` so log always contains it; refreshTmuxJob detects completion from log. Spawn runner is preferred.
 
-**Data flow (interactive mode, `--interactive`)**: Always uses tmux. `start` writes prompt to `.prompt` file → generates OS-aware launcher `.sh` script → creates detached tmux session → launcher starts `codex` TUI via `script` (BSD/GNU auto-detected) → prompt sent via `send-keys` (or `load-buffer` for >5000 chars) → returns job ID. Idle detection monitors for completion (30s grace period).
+**Data flow (interactive mode, `--interactive`)**: Always uses tmux. `start` writes prompt to `.prompt` file → generates OS-aware launcher `.sh` script → creates detached tmux session → launcher starts `codex` TUI with prompt as positional CLI arg via `"$(cat promptFile)"` (no send-keys for initial prompt). Linux uses `script -q -e -c` (exit-code propagating), macOS uses `script -q log bash -c`. Marker captured inside `script` for reliable completion detection. Idle detection monitors for completion via `.turn-complete` signal file (notify hook) with `? for shortcuts` string fallback.
 
 **Storage**: Job metadata stored via `JobStore` abstraction. Default `dual` mode writes to both JSON files + SQLite (WAL mode), reads from SQLite with JSON fallback. Auto-backfills JSON→SQLite on first init. Override with `CODEX_AGENT_STORAGE=json|sqlite`.
 
@@ -104,15 +104,16 @@ bin/codex-agent (shell wrapper)
 - **Dual modes + dual runners**: Exec mode defaults to spawn runner (no tmux); interactive mode always uses tmux TUI. Set `CODEX_AGENT_EXEC_RUNNER=tmux` for legacy exec behavior.
 - **Completion detection (exec/spawn)**: Process exit → exit code file checked via `PIPESTATUS[0]`; exit 0 = completed, non-zero = failed. Exit code is authoritative — completion marker does NOT override non-zero exits.
 - **Completion detection (exec/tmux)**: Marker string `[codex-agent: Session complete` in log/pane output
-- **Completion detection (interactive)**: Idle detection — `? for shortcuts` pattern matched at line start in last 5 pane lines + log mtime stable for 30s → auto-sends `/exit`
+- **Completion detection (interactive)**: Idle detection — reads `.turn-complete` signal file from notify hook (authoritative); falls back to `? for shortcuts` pane string match for jobs without the hook. Both gated on 30s grace + log mtime stable → auto-sends `/exit`
+- **Trust dialog auto-onboard**: `codex-trust.ts:ensureTrustedProject` writes `[projects."<cwd>"] trust_level = "trusted"` to `~/.codex/config.toml` before each job start so codex 0.133.0+ does not block on the trust dialog. Existing sections (any `trust_level`) are left untouched.
 - **Auto-constraint injection**: `<design_and_scope_constraints>` and `<context_loading>` XML blocks auto-appended to all prompts (with dedup detection); opt-out with `--no-constraints`. Gemini auto-disables constraints.
 - **Idle detection safety**: 30s grace period, log mtime stability check, `exitSent` flag prevents duplicates, false positive recovery when codex resumes; `--keep-alive` disables auto-exit entirely
-- **send command**: Only works for `--interactive` jobs; exec mode jobs reject send with error; also blocked when `/exit` already sent
+- **send command**: Only works for `--interactive` jobs; exec mode jobs reject send with error; also blocked when `/exit` already sent. **Known fragility**: multi-turn `send` still uses tmux send-keys / load-buffer (codex CLI has no alternative API for live injection) — short prompts work, but anything that races codex's input handler can drop characters. For reliable multi-step work, prefer one fresh job per phase over long-lived multi-turn.
 - **Launcher scripts**: Each job generates a `.sh` launcher script; tmux runs `bash <launcher>` — user prompts never embedded in shell commands
 - **Argv-safe execution**: All tmux commands use `spawnSync` with argv arrays (no shell interpolation)
 - **Atomic writes**: All JSON/signal file writes use temp-file + `renameSync` pattern (via `src/fs-utils.ts`)
 - **Crash detection**: When tmux session disappears, log is checked for completion marker; no marker = `failed` status
-- **Hardcoded delays**: Interactive mode uses `sleep` (0.3–1s) between tmux commands for TUI sync — fragile but necessary
+- **Hardcoded delays**: Multi-turn `send` still uses `sleep 0.3` between paste and Enter for TUI sync; initial prompt no longer needs this since it goes through codex CLI arg.
 - **Shell quoting in launchers**: `shellQuote()` function uses standard `'\''` technique for safe embedding in bash scripts
 - **Inactivity timeout**: Exec mode: 60 min, interactive mode: 120 min — auto-killed on log inactivity
 - **Log files**: Contain ANSI terminal codes; use `--strip-ansi` for clean output
@@ -141,6 +142,7 @@ plugins/codex-orchestrator/
 | interactiveTimeout | 120 minutes |
 | idleDetectionEnabled | `true` |
 | idleGracePeriodSeconds | `30` |
+| pendingJobTimeoutMinutes | `5` |
 | storageMode | `dual` (env: `CODEX_AGENT_STORAGE`) |
 | execRunner | `spawn` (env: `CODEX_AGENT_EXEC_RUNNER`) |
 | provider | `openai` (env: `CODEX_AGENT_PROVIDER`) |
