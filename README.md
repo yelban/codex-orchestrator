@@ -111,6 +111,80 @@ bash <(curl -fsSL https://raw.githubusercontent.com/yelban/codex-orchestrator/ma
 
 **Platform support:** macOS and Linux. Windows users should use WSL.
 
+## macOS Notes
+
+Two macOS-specific gotchas that can block first-time setup. Hit either of these
+and your first `codex-agent` job will hang or fail.
+
+### 1. Directory trust (first time in a new project)
+
+Codex CLI v0.133+ requires explicit trust for each working directory. The TUI
+prompt — "Do you trust the contents of this directory?" — cannot be answered
+from `codex-agent` exec mode. The agent will hang at the prompt and the only
+recovery is `codex-agent kill <id>` (status will show `FAILED`).
+
+**Solution:** Pre-trust new directories by editing `~/.codex/config.toml`:
+
+```toml
+[projects."/Users/you/path/to/project"]
+trust_level = "trusted"
+```
+
+Or run `codex` interactively once in the new directory and press `y` — that
+writes the same entry automatically.
+
+Inspect current trusted directories:
+
+```bash
+grep '^\[projects' ~/.codex/config.toml
+```
+
+### 2. Claude Code sandbox blocks `configd`
+
+When `codex-agent` is invoked from inside Claude Code, the harness sandbox can
+block Unix socket access to macOS `configd` (used by `system-configuration` for
+DNS). The Rust binary then panics:
+
+```
+thread 'main' panicked at system-configuration crate ...
+```
+
+**Solution A (per-call):** Pass `dangerouslyDisableSandbox: true` to every
+Bash invocation that runs `codex-agent`. This is safe because `codex-agent`
+manages its own sandbox via `-s` flag — the Claude Code outer sandbox is
+redundant here.
+
+```
+Bash(codex-agent start "..." --map, dangerouslyDisableSandbox: true)
+Bash(codex-agent await-turn <id>, dangerouslyDisableSandbox: true)
+```
+
+**Solution B (permanent, recommended):** Add an exclusion to
+`~/.claude/settings.json`:
+
+```json
+"sandbox": {
+  "excludedCommands": ["codex", "codex-agent", "codex-bg"]
+}
+```
+
+After saving, restart Claude Code to apply.
+
+### 3. PATH doesn't pick up in current Claude Code session
+
+The install script appends `export PATH=...` to `~/.zshrc`, but the currently
+running Claude Code session was launched with the old environment — so
+`which codex-agent` returns "not found" inside that session even though it
+exists on disk.
+
+Three workarounds:
+
+| Solution | When to use |
+|---|---|
+| Restart Claude Code | Best long-term — every new session picks up the new PATH |
+| Use absolute path `~/.codex-orchestrator/bin/codex-agent` | Need it working right now in current session |
+| Open a fresh terminal | If running CLI outside Claude Code |
+
 ## Why?
 
 When you're working with Claude Code and need parallel execution, investigation tasks, or long-running operations - spawn Codex agents in the background. They run in tmux sessions so you can:
@@ -156,6 +230,81 @@ codex-agent capture <jobId>
 
 # Redirect the agent mid-task (interactive only)
 codex-agent send <jobId> "Focus on the authentication module instead"
+```
+
+### Hello World (Verify Installation)
+
+A safe read-only test against any repo to confirm setup end-to-end:
+
+```bash
+cd /path/to/some/repo
+
+# Spawn a read-only research agent
+JOB=$(codex-agent start "List top-level files and summarize the README in one sentence." \
+  --map -s read-only -r high 2>&1 \
+  | grep -oE 'Job started: [a-f0-9]{8}' | awk '{print $3}')
+echo "Job: $JOB"
+
+# Block until agent responds (typically 30s-2min for simple tasks)
+codex-agent await-turn "$JOB"
+
+# Parse and print the agent's actual response text
+codex-agent output "$JOB" | python3 -c "
+import sys, json
+for line in sys.stdin:
+    line = line.strip()
+    if not line.startswith('{'): continue
+    try: e = json.loads(line)
+    except: continue
+    if e.get('type') == 'item.completed' and e.get('item', {}).get('type') == 'agent_message':
+        print(e['item']['text']); print()
+"
+```
+
+> **Why parse JSON for the response?** `status` and `capture` only show
+> metadata or raw TUI noise. The agent's actual text response lives in the
+> `output` JSON event stream as `item.completed` events with
+> `item.type == "agent_message"`.
+
+**Typical metrics** for a read-only 2-file research task (gpt-5.5 high):
+
+| Metric | Value |
+|---|---|
+| Duration | ~30-60 seconds |
+| Input tokens | ~90k (60%+ cached on repeat runs) |
+| Output tokens | ~1-2k |
+| Reasoning tokens | ~300-500 |
+
+### Convenience shell function
+
+Once installed, add this to `~/.zshrc` (or `~/.bashrc`) to spawn, await,
+and print agent responses in one call:
+
+```bash
+codex-ask() {
+    local prompt="$1"
+    local job=$(codex-agent start "$prompt" --map -s read-only -r high 2>&1 \
+        | grep -oE 'Job started: [a-f0-9]{8}' | awk '{print $3}')
+    [ -z "$job" ] && { echo "spawn failed"; return 1; }
+    echo "Job: $job (waiting...)"
+    codex-agent await-turn "$job"
+    codex-agent output "$job" | python3 -c "
+import sys, json
+for line in sys.stdin:
+    line=line.strip()
+    if not line.startswith('{'): continue
+    try: e=json.loads(line)
+    except: continue
+    if e.get('type')=='item.completed' and e.get('item',{}).get('type')=='agent_message':
+        print(e['item']['text']); print()
+"
+}
+```
+
+Then:
+
+```bash
+codex-ask "list all .ts files under src/ and one-line each"
 ```
 
 ## Commands
@@ -339,6 +488,9 @@ See [plugins/codex-orchestrator/README.md](plugins/codex-orchestrator/README.md)
 - Use `--map` to give agents codebase context (requires docs/CODEBASE_MAP.md)
 - Use `-s read-only` for research tasks that shouldn't modify files
 - Kill stuck jobs with `codex-agent kill <id>` only as a last resort
+- macOS: pre-trust new project directories in `~/.codex/config.toml` to avoid TUI hangs (see [macOS Notes](#macos-notes))
+- macOS: invoke `codex-agent` from Claude Code with `dangerouslyDisableSandbox: true` or add `excludedCommands` to `~/.claude/settings.json` (see [macOS Notes](#macos-notes))
+- Parse `agent_message` from the `output` JSON event stream — `status` and `capture` won't show response text directly
 
 ## Documentation
 
