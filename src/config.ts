@@ -7,9 +7,10 @@ export type ExecRunner = "tmux" | "spawn";
 export type Provider = "openai" | "gemini";
 
 export const config = {
-  // Default model (use --fast for spark)
-  model: "gpt-5.4",
-  fastModel: "gpt-5.4-spark",
+  // Default model. --fast is currently a no-op alias for the main model;
+  // OpenAI has no gpt-5.5-spark/mini variant as of 2026-05.
+  model: "gpt-5.5",
+  fastModel: "gpt-5.5",
 
   // Reasoning effort levels
   reasoningEfforts: ["low", "medium", "high", "xhigh"] as const,
