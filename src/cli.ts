@@ -280,7 +280,7 @@ function formatJobStatus(job: Job): string {
 
 function refreshJobsForDisplay(jobs: Job[]): Job[] {
   return jobs.map((job) => {
-    if (job.status !== "running") return job;
+    if (job.status !== "running" && job.status !== "pending") return job;
     const refreshed = refreshJobStatus(job.id);
     return refreshed ?? job;
   });

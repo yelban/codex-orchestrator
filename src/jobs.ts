@@ -473,17 +473,29 @@ export function isJobRunning(jobId: string): boolean {
   return false;
 }
 
+const PENDING_TIMEOUT_MS = 5 * 60 * 1000;
+
 export function refreshJobStatus(jobId: string): Job | null {
   const job = loadJob(jobId);
   if (!job) return null;
 
-  if (job.status !== "running") return job;
+  if (job.status !== "running" && job.status !== "pending") return job;
 
-  // Route by runner type
+  // Route by runner type. Both spawn and tmux helpers promote pending → running
+  // when they detect the process/session is alive, and mark stale pending jobs
+  // failed if the runner never came up within PENDING_TIMEOUT_MS.
   if (job.runner === "spawn" && job.pid) {
     refreshSpawnJob(job);
   } else if (job.tmuxSession) {
     refreshTmuxJob(job);
+  } else if (job.status === "pending") {
+    const ageMs = Date.now() - Date.parse(job.createdAt);
+    if (ageMs > PENDING_TIMEOUT_MS) {
+      job.status = "failed";
+      job.error = "Pending job had no runner attached";
+      job.completedAt = new Date().toISOString();
+      saveJob(job);
+    }
   }
 
   return loadJob(jobId);
@@ -494,6 +506,10 @@ function refreshSpawnJob(job: Job): void {
   if (!job.pid) return;
 
   if (isProcessAlive(job.pid)) {
+    if (job.status === "pending") {
+      job.status = "running";
+      saveJob(job);
+    }
     // Still running — check Gemini hard max runtime
     if ((job.provider ?? "openai") === "gemini") {
       const elapsedMs = computeElapsedMs(job);
@@ -547,6 +563,17 @@ function refreshTmuxJob(job: Job): void {
   if (!job.tmuxSession) return;
 
   if (!sessionExists(job.tmuxSession)) {
+    if (job.status === "pending") {
+      // Session never started. Wait until age exceeds timeout before failing.
+      const ageMs = Date.now() - Date.parse(job.createdAt);
+      if (ageMs > PENDING_TIMEOUT_MS) {
+        job.status = "failed";
+        job.error = "tmux session never started";
+        job.completedAt = new Date().toISOString();
+        saveJob(job);
+      }
+      return;
+    }
     // Session ended — check log for completion marker to distinguish success vs crash
     job.completedAt = new Date().toISOString();
     const logFile = join(config.jobsDir, `${job.id}.log`);
@@ -568,7 +595,13 @@ function refreshTmuxJob(job: Job): void {
     return;
   }
 
-  // Session exists — check for completion marker
+  // Session exists — promote pending to running before further checks
+  if (job.status === "pending") {
+    job.status = "running";
+    saveJob(job);
+  }
+
+  // Check for completion marker in pane output
   const output = capturePane(job.tmuxSession, { lines: 20 });
   if (output && output.includes("[codex-agent: Session complete")) {
     job.status = "completed";
