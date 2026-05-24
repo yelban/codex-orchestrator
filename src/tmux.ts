@@ -407,6 +407,29 @@ export function getAttachCommand(sessionName: string): string {
 }
 
 /**
+ * Kill codex-agent tmux sessions that are not present in `activeSessionNames`.
+ * Sessions younger than `graceSec` are skipped to avoid racing freshly created sessions.
+ * Returns the count of sessions killed.
+ */
+export function cleanupOrphanedSessions(
+  activeSessionNames: Set<string>,
+  graceSec: number = 30,
+): number {
+  const now = Date.now();
+  const graceMs = graceSec * 1000;
+  let killed = 0;
+
+  for (const session of listSessions()) {
+    if (activeSessionNames.has(session.name)) continue;
+    const ageMs = now - Date.parse(session.created);
+    if (Number.isNaN(ageMs) || ageMs < graceMs) continue;
+    if (killSession(session.name)) killed++;
+  }
+
+  return killed;
+}
+
+/**
  * Check if the session's codex process is still running
  */
 export function isSessionActive(sessionName: string): boolean {

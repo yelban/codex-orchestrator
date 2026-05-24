@@ -843,8 +843,10 @@ async function main() {
       }
 
       case "clean": {
-        const cleaned = cleanupOldJobs(7);
-        console.log(`Cleaned ${cleaned} old jobs`);
+        const { jobsDeleted, orphanedSessionsKilled } = cleanupOldJobs(7);
+        console.log(
+          `Cleaned ${jobsDeleted} old jobs and killed ${orphanedSessionsKilled} orphaned tmux sessions`,
+        );
         break;
       }
 

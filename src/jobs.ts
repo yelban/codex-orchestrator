@@ -8,6 +8,7 @@ import { extractSessionId, findSessionFile, parseSessionFile, type ParsedSession
 import { getStore } from "./store/index.ts";
 import {
   createSession,
+  cleanupOrphanedSessions,
   killSession,
   sessionExists,
   getSessionName,
@@ -445,19 +446,33 @@ export function getJobFullOutput(jobId: string): string | null {
   }
 }
 
-export function cleanupOldJobs(maxAgeDays: number = 7): number {
+export interface CleanupResult {
+  jobsDeleted: number;
+  orphanedSessionsKilled: number;
+}
+
+export function cleanupOldJobs(maxAgeDays: number = 7): CleanupResult {
   const jobs = listJobs();
   const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000;
-  let cleaned = 0;
+  let jobsDeleted = 0;
 
   for (const job of jobs) {
     const jobTime = new Date(job.completedAt || job.createdAt).getTime();
     if (jobTime < cutoff && (job.status === "completed" || job.status === "failed")) {
-      if (deleteJob(job.id)) cleaned++;
+      if (deleteJob(job.id)) jobsDeleted++;
     }
   }
 
-  return cleaned;
+  // Collect tmux session names still bound to active jobs so we don't kill them.
+  const activeSessionNames = new Set<string>();
+  for (const job of listJobs()) {
+    if ((job.status === "running" || job.status === "pending") && job.tmuxSession) {
+      activeSessionNames.add(job.tmuxSession);
+    }
+  }
+  const orphanedSessionsKilled = cleanupOrphanedSessions(activeSessionNames);
+
+  return { jobsDeleted, orphanedSessionsKilled };
 }
 
 export function isJobRunning(jobId: string): boolean {
