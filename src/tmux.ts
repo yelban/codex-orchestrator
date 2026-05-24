@@ -80,6 +80,11 @@ function getExecApprovalFlag(sandbox: string): string {
 
 // ---------- launcher script builders ----------
 
+/**
+ * @deprecated Used only when CODEX_AGENT_EXEC_RUNNER=tmux. The default spawn
+ * runner (`src/spawn-runner.ts`) provides authoritative exit-code-based
+ * completion detection and is preferred. Kept for backward compatibility.
+ */
 function buildExecLauncher(opts: {
   promptFile: string;
   logFile: string;
@@ -91,18 +96,18 @@ function buildExecLauncher(opts: {
   const approvalFlag = getExecApprovalFlag(opts.sandbox);
   return [
     "#!/bin/bash",
-    "set -euo pipefail",
+    "set -uo pipefail",
     "",
-    `cat ${q(opts.promptFile)} | codex exec \\`,
-    `  -m ${q(opts.model)} \\`,
-    `  -c model_reasoning_summary=concise \\`,
-    `  -c model_reasoning_effort=${q(opts.reasoningEffort)} \\`,
-    `  -s ${q(opts.sandbox)} \\`,
-    `  ${approvalFlag} \\`,
-    `  --json - 2>&1 | tee ${q(opts.logFile)}`,
-    "",
-    "printf '\\n\\n[codex-agent: Session complete. Press Enter to close.]\\n'",
-    "read",
+    "(",
+    `  cat ${q(opts.promptFile)} | codex exec \\`,
+    `    -m ${q(opts.model)} \\`,
+    `    -c model_reasoning_summary=concise \\`,
+    `    -c model_reasoning_effort=${q(opts.reasoningEffort)} \\`,
+    `    -s ${q(opts.sandbox)} \\`,
+    `    ${approvalFlag} \\`,
+    `    --json - 2>&1`,
+    `  printf '\\n\\n[codex-agent: Session complete]\\n'`,
+    `) | tee ${q(opts.logFile)}`,
     "",
   ].join("\n");
 }
@@ -133,19 +138,22 @@ function buildInteractiveLauncher(opts: {
     `"$(cat ${q(opts.promptFile)})"`,
   ].join(" ");
 
-  const lines = ["#!/bin/bash", "set -euo pipefail", ""];
+  // Chain printf after codex so the completion marker is captured INSIDE
+  // `script` (otherwise it lands outside the PTY and never reaches the log,
+  // leaving refreshTmuxJob unable to mark the job completed).
+  const completionMarker = "printf '\\n\\n[codex-agent: Session complete]\\n'";
+  const codexShell = `${codexCmd} ; ${completionMarker}`;
+
+  const lines = ["#!/bin/bash", "set -uo pipefail", ""];
 
   if (platform() === "linux") {
-    // GNU script: script -q -c "command" logfile
-    lines.push(`script -q -c ${q(codexCmd)} ${q(opts.logFile)}`);
+    // GNU script: -e propagates child exit code; -c takes a shell command string.
+    lines.push(`script -q -e -c ${q(codexShell)} ${q(opts.logFile)}`);
   } else {
-    // BSD script (macOS): script -q logfile command args...
-    lines.push(`script -q ${q(opts.logFile)} ${codexCmd}`);
+    // BSD script (macOS): no -c flag; wrap the chain in `bash -c` so the
+    // semicolon and quoting are interpreted as a shell command.
+    lines.push(`script -q ${q(opts.logFile)} bash -c ${q(codexShell)}`);
   }
-
-  lines.push("");
-  lines.push("printf '\\n\\n[codex-agent: Session complete. Press Enter to close.]\\n'");
-  lines.push("read");
   lines.push("");
 
   return lines.join("\n");
