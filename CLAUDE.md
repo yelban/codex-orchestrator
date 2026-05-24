@@ -191,3 +191,47 @@ For detailed architecture, see [docs/CODEBASE_MAP.md](docs/CODEBASE_MAP.md).
 - Use `codex-agent capture <id> [n]` for incremental tails while running.
 - Use `codex-agent output <id>` for final transcript after completion.
 - Multi-provider patterns (parallel analysis, generate→review, specialist routing) are documented in SKILL.md.
+
+## Workflow / Ultrawork Integration
+
+在 Workflow 腳本（`agent()` / `parallel()` / `pipeline()` 等原語）中需要委派**編碼任務**時，子代理應透過 Bash 呼叫 `codex-agent`，而非在 Claude 子代理內部自行撰寫程式邏輯。`codex-agent` 提供沙箱隔離、進度追蹤與多 provider 路由；直接用 `agent()` 寫程式會繞過這些保障。
+
+### 前置確認
+
+```bash
+codex-agent health   # 確認 codex CLI 可用；失敗則中止 Workflow
+```
+
+需在 `.claude/settings.json` 的 Bash 白名單加入 `Bash(codex-agent:*)`。
+
+### 兩種標準慣用法
+
+**單一阻塞任務**（子代理等待完成再繼續）：
+
+```bash
+codex-agent start "<task>" --wait
+codex-agent output <id>
+```
+
+**扇出並行**（>5 個任務時必用，避免阻塞子代理行程）：
+
+```bash
+id=$(codex-agent start "<task>")   # 背景啟動，立即回傳 ID
+codex-agent await-turn "$id"       # 等待當前回合完成
+codex-agent output "$id"           # 讀取輸出
+```
+
+### 子代理的角色
+
+Workflow 中間的 Claude 子代理負責三件事：
+
+1. **Prompt 塑形**：將高層目標轉為 codex 能執行的具體指令
+2. **條件路由**：依任務類型決定 `--provider openai|gemini`、是否加 `--no-constraints`
+3. **輸出解析**：從 `codex-agent output` 的文字中提取結論、錯誤碼或檔案清單
+
+### 關鍵注意事項
+
+- **一律用 exec 模式**，禁用 `--interactive`（Workflow 無人值守，tmux TUI 無法操作）
+- **Gemini 任務**：`tokens`、`files_modified`、`summary` 永遠為 `null`，解析前先判斷 provider
+- **`--wait` 阻塞行程**：超過 5 個並行任務時改用背景模式（`start` 不加 `--wait`）+ `await-turn`
+- **tmux runner 已棄用**：不要設定 `CODEX_AGENT_EXEC_RUNNER=tmux`
